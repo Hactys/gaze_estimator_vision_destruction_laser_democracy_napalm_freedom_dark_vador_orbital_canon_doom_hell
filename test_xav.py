@@ -22,9 +22,17 @@ RIGHT_IRIS = [469, 470, 471, 472]
 LEFT_EYE = {"outer": 33, "inner": 133, "top": 159, "bottom": 145, "iris": 468}
 RIGHT_EYE = {"outer": 263, "inner": 362, "top": 386, "bottom": 374, "iris": 473}
 
-SMOOTHING = 0.35          # lissage exponentiel du point de regard
+SMOOTHING = 0.2           # lissage exponentiel du point de regard (plus haut = plus réactif, mais plus nerveux)
+GAIN_X = 7.0              # amplification horizontale autour du centre
+GAIN_Y = 10.0              # amplification verticale (généralement plus haute : l'amplitude naturelle est plus faible)
 CANVAS_SIZE = (720, 1280)  # hauteur, largeur de la fenêtre "curseur"
 CURSOR_RADIUS = 12
+
+
+def apply_gain(value, center, gain):
+    """Amplifie l'écart par rapport au centre calibré, puis reclippe dans [0, 1]."""
+    amplified = 0.5 + (value - center) * gain
+    return min(1.0, max(0.0, amplified))
 
 
 def eye_ratio(landmarks, eye):
@@ -68,6 +76,7 @@ def main():
     start = time.time()
 
     smoothed_rx, smoothed_ry = 0.5, 0.5
+    center_rx, center_ry = 0.5, 0.5  # position de référence, ajustée par la calibration (Espace)
 
     with FaceLandmarker.create_from_options(options) as landmarker:
         while cap.isOpened():
@@ -112,21 +121,30 @@ def main():
                 smoothed_ry += SMOOTHING * (ry - smoothed_ry)
 
             # Fenêtre "curseur" : un point qui suit le regard sur un canvas dédié
+            gained_rx = apply_gain(smoothed_rx, center_rx, GAIN_X)
+            gained_ry = apply_gain(smoothed_ry, center_ry, GAIN_Y)
+
             canvas_h, canvas_w = CANVAS_SIZE
             canvas = np.full((canvas_h, canvas_w, 3), 20, dtype=np.uint8)
-            cursor_x = int(smoothed_rx * canvas_w)
-            cursor_y = int(smoothed_ry * canvas_h)
+            cursor_x = int(gained_rx * canvas_w)
+            cursor_y = int((1.0 - gained_ry) * canvas_h)
             cv2.circle(canvas, (cursor_x, cursor_y), CURSOR_RADIUS, (0, 255, 0), -1)
-            cv2.putText(canvas, f"({smoothed_rx:.2f}, {smoothed_ry:.2f})", (10, 30),
+            cv2.putText(canvas, f"({gained_rx:.2f}, {gained_ry:.2f})", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            cv2.putText(canvas, "Espace = calibrer", (10, canvas_h - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
 
             # Afficher les résultats
             cv2.imshow('Eye Tracker', image)
             cv2.imshow('Curseur', canvas)
 
-            # Quitter avec la touche 'Echap'
-            if cv2.waitKey(5) & 0xFF == 27:
+            # Quitter avec la touche 'Echap', calibrer avec 'Espace'
+            key = cv2.waitKey(5) & 0xFF
+            if key == 27:
                 break
+            elif key == 32:
+                center_rx, center_ry = smoothed_rx, smoothed_ry
+                print(f"Calibré sur ({center_rx:.2f}, {center_ry:.2f})")
 
     cap.release()
     cv2.destroyAllWindows()

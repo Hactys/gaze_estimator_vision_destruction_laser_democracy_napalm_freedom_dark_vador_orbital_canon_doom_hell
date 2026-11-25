@@ -1,6 +1,26 @@
+"""Eye tracker webcam (MediaPipe Face Landmarker) - version précision.
+
+Principales différences avec la v1 :
+  * Repère propre à chaque œil (ligne des coins), calculé en PIXELS et normalisé par la
+    LARGEUR de l'œil. L'ancien ratio iris / (paupière haute - paupière basse) est instable
+    en vertical : la paupière suit l'iris quand on regarde en bas, et clignote.
+  * Features supplémentaires pour le vertical : blendshapes eyeLookUp/Down, ouverture de l'œil.
+  * Compensation de la pose de tête (yaw / pitch, position et taille du visage).
+  * Calibration 16 points + régression ridge (polynôme d'ordre 2 sur l'œil, linéaire sur le reste)
+    avec une validation croisée "leave-one-point-out" qui donne l'erreur réelle.
+  * Filtre One Euro (peu de lag sur les saccades, très stable en fixation).
+  * Gel pendant les clignements (et 150 ms après), qui faussent surtout l'axe vertical.
+  * Signe vertical corrigé : y image vers le bas = curseur vers le bas (plus de "1 - y").
+
+Touches : C = calibrer | Espace = recentrer (regarde le centre) | R = reset |
+          F = plein écran | Echap = quitter (ou annuler la calibration)
+"""
+import math
 import os
+import random
 import time
 import urllib.request
+from collections import deque
 
 import cv2
 import mediapipe as mp
@@ -14,50 +34,320 @@ MODEL_URL = (
 )
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "face_landmarker.task")
 
-# Indices des points de repère pour l'iris gauche et droit (API Tasks, refine_landmarks inclus par défaut)
-LEFT_IRIS = [474, 475, 476, 477]
-RIGHT_IRIS = [469, 470, 471, 472]
+# Points de repère par œil (indices du modèle 478 points). Les coins sont triés par x dans le code,
+# donc peu importe quel œil du sujet c'est : A = œil à gauche de l'image affichée, B = à droite.
+EYE_A = {"outer": 33, "inner": 133, "top": 159, "bottom": 145, "iris": 468, "contour": [469, 470, 471, 472]}
+EYE_B = {"outer": 263, "inner": 362, "top": 386, "bottom": 374, "iris": 473, "contour": [474, 475, 476, 477]}
+NOSE_TIP = 1
 
-# Coins et centre d'iris pour chaque œil, utilisés pour calculer la position du regard
-LEFT_EYE = {"outer": 33, "inner": 133, "top": 159, "bottom": 145, "iris": 468}
-RIGHT_EYE = {"outer": 263, "inner": 362, "top": 386, "bottom": 374, "iris": 473}
-
-SMOOTHING = 0.2           # lissage exponentiel du point de regard (plus haut = plus réactif, mais plus nerveux)
-GAIN_X = 7.0              # amplification horizontale autour du centre
-GAIN_Y = 10.0              # amplification verticale (généralement plus haute : l'amplitude naturelle est plus faible)
-CANVAS_SIZE = (720, 1280)  # hauteur, largeur de la fenêtre "curseur"
+# --- Réglages ---------------------------------------------------------------------------------
+CAM_WIDTH, CAM_HEIGHT, CAM_FPS = 1280, 720, 30
+CANVAS_SIZE = (720, 1280)        # hauteur, largeur de la fenêtre "curseur"
 CURSOR_RADIUS = 12
 
+CAL_COLS, CAL_ROWS = 4, 4        # grille de calibration (16 points, ~25 s)
+CAL_MARGIN = 0.08                # marge des cibles par rapport au bord de la fenêtre
+CAL_SETTLE_S = 0.7               # temps laissé à l'œil pour atteindre la cible (échantillons jetés)
+CAL_COLLECT_S = 1.1              # durée de collecte par cible
+CAL_MIN_SAMPLES = 8              # échantillons minimum par cible pour la valider
+CAL_MIN_POINTS = 8               # cibles validées minimum pour accepter la calibration
+RIDGE_LAMBDA = 1.0               # régularisation (sur features standardisées)
 
-def apply_gain(value, center, gain):
-    """Amplifie l'écart par rapport au centre calibré, puis reclippe dans [0, 1]."""
-    amplified = 0.5 + (value - center) * gain
-    return min(1.0, max(0.0, amplified))
+ONE_EURO_MIN_CUTOFF = 0.6        # Hz : plus bas = plus stable en fixation, plus de lag
+ONE_EURO_BETA = 3.0              # plus haut = moins de lag pendant les mouvements rapides
+ONE_EURO_D_CUTOFF = 1.0
+
+BLINK_THRESHOLD = 0.6            # score moyen eyeBlinkLeft/Right au-dessus duquel on gèle
+BLINK_HOLD_S = 0.15              # gel supplémentaire après le clignement (paupière qui remonte)
+
+FALLBACK_GAIN_X = 3.0            # mapping approximatif utilisé tant qu'on n'est pas calibré
+FALLBACK_GAIN_Y = 6.0
+
+FEATURE_NAMES = ["fx", "fy", "bv", "ap", "yaw", "pitch", "hx", "hy", "hs"]
+# Plancher d'écart-type par colonne du design (9 features + fx², fy², fx*fy) : évite d'amplifier
+# du bruit quand une feature (ex : la tête) a très peu varié pendant la calibration.
+SD_FLOORS = np.array([0.01, 0.005, 0.05, 0.02, 2.0, 2.0, 0.01, 0.01, 0.005, 0.002, 0.0005, 0.0005])
+
+CAM_WIN = "Eye Tracker"
+CURSOR_WIN = "Curseur"
 
 
-def eye_ratio(landmarks, eye):
-    """Position de l'iris dans son propre socket, en [0, 1]x[0, 1]."""
-    ox, oy = landmarks[eye["outer"]].x, landmarks[eye["outer"]].y
-    ix, iy = landmarks[eye["inner"]].x, landmarks[eye["inner"]].y
-    tx, ty = landmarks[eye["top"]].x, landmarks[eye["top"]].y
-    bx, by = landmarks[eye["bottom"]].x, landmarks[eye["bottom"]].y
-    px, py = landmarks[eye["iris"]].x, landmarks[eye["iris"]].y
+# --- Utilitaires de calcul --------------------------------------------------------------------
+class OneEuroFilter:
+    """Filtre One Euro (Casiez et al., 2012) pour un signal scalaire."""
 
-    x_lo, x_hi = min(ox, ix), max(ox, ix)
-    y_lo, y_hi = min(ty, by), max(ty, by)
+    def __init__(self, min_cutoff, beta, d_cutoff):
+        self.min_cutoff, self.beta, self.d_cutoff = min_cutoff, beta, d_cutoff
+        self.reset()
 
-    rx = (px - x_lo) / (x_hi - x_lo) if x_hi > x_lo else 0.5
-    ry = (py - y_lo) / (y_hi - y_lo) if y_hi > y_lo else 0.5
-    return rx, ry
+    def reset(self):
+        self.t_prev = None
+        self.x_prev = 0.0
+        self.dx_prev = 0.0
+
+    @staticmethod
+    def _alpha(dt, cutoff):
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def __call__(self, x, t):
+        if self.t_prev is None:
+            self.t_prev, self.x_prev, self.dx_prev = t, x, 0.0
+            return x
+        dt = max(t - self.t_prev, 1e-3)
+        dx = (x - self.x_prev) / dt
+        a_d = self._alpha(dt, self.d_cutoff)
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = self._alpha(dt, cutoff)
+        x_hat = a * x + (1.0 - a) * self.x_prev
+        self.t_prev, self.x_prev, self.dx_prev = t, x_hat, dx_hat
+        return x_hat
 
 
+def eye_features(lm, eye, w, h):
+    """Position de l'iris dans le repère de l'œil, en unités de largeur d'œil.
+
+    Calcul en pixels (x et y n'ont pas la même échelle en coordonnées normalisées), dans un repère
+    tourné pour suivre la ligne des coins : insensible au roll de la tête.
+    Retourne (fx, fy, ap) : fx > 0 = iris vers la droite de l'image, fy > 0 = iris vers le bas,
+    ap = ouverture verticale de l'œil / largeur.
+    """
+    def p(i):
+        return np.array([lm[i].x * w, lm[i].y * h])
+
+    a, b = p(eye["outer"]), p(eye["inner"])
+    left, right = (a, b) if a[0] <= b[0] else (b, a)
+    width = float(np.linalg.norm(right - left))
+    if width < 1e-6:
+        return None
+    u = (right - left) / width
+    v = np.array([-u[1], u[0]])  # perpendiculaire à u, orientée vers le bas de l'image
+    center = (left + right) / 2.0
+    d = p(eye["iris"]) - center
+    ap = float(np.linalg.norm(p(eye["top"]) - p(eye["bottom"])) / width)
+    return float(d @ u) / width, float(d @ v) / width, ap
+
+
+def head_pose(result):
+    """(yaw, pitch, roll) en degrés depuis la matrice de transformation du visage."""
+    mats = result.facial_transformation_matrixes
+    if mats is None or len(mats) == 0:
+        return 0.0, 0.0, 0.0
+    rot = np.array(mats[0], dtype=float)[:3, :3]
+    norms = np.linalg.norm(rot, axis=0)
+    if np.any(norms < 1e-9):
+        return 0.0, 0.0, 0.0
+    rot = rot / norms  # retire l'échelle éventuelle
+    pitch = math.degrees(math.atan2(rot[2, 1], rot[2, 2]))
+    yaw = math.degrees(math.atan2(-rot[2, 0], math.hypot(rot[2, 1], rot[2, 2])))
+    roll = math.degrees(math.atan2(rot[1, 0], rot[0, 0]))
+    if pitch > 90:
+        pitch -= 180
+    elif pitch < -90:
+        pitch += 180
+    return yaw, pitch, roll
+
+
+def extract_features(result, w, h):
+    """Vecteur de features (voir FEATURE_NAMES) + score de clignement. None si inexploitable."""
+    lm = result.face_landmarks[0]
+    ea, eb = eye_features(lm, EYE_A, w, h), eye_features(lm, EYE_B, w, h)
+    if ea is None or eb is None:
+        return None
+    fx, fy, ap = (ea[0] + eb[0]) / 2, (ea[1] + eb[1]) / 2, (ea[2] + eb[2]) / 2
+
+    bs = {}
+    if result.face_blendshapes:
+        bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
+    if bs:
+        blink = (bs.get("eyeBlinkLeft", 0.0) + bs.get("eyeBlinkRight", 0.0)) / 2
+    else:
+        blink = 1.0 if ap < 0.08 else 0.0
+    down = (bs.get("eyeLookDownLeft", 0.0) + bs.get("eyeLookDownRight", 0.0)) / 2
+    up = (bs.get("eyeLookUpLeft", 0.0) + bs.get("eyeLookUpRight", 0.0)) / 2
+    bv = down - up  # haut/bas sont symétriques : pas affecté par l'inversion gauche/droite du miroir
+
+    yaw, pitch, _ = head_pose(result)
+    hx, hy = lm[NOSE_TIP].x, lm[NOSE_TIP].y
+    hs = math.hypot((lm[33].x - lm[263].x) * w, (lm[33].y - lm[263].y) * h) / w  # ~ 1 / distance caméra
+    return np.array([fx, fy, bv, ap, yaw, pitch, hx, hy, hs]), blink
+
+
+def design_matrix(feats):
+    fx, fy = feats[:, 0], feats[:, 1]
+    return np.hstack([feats, (fx * fx)[:, None], (fy * fy)[:, None], (fx * fy)[:, None]])
+
+
+class GazeModel:
+    """Régression ridge : features -> point (x, y) normalisé dans la fenêtre."""
+
+    def __init__(self, lam):
+        self.lam = lam
+
+    def fit(self, feats, targets):
+        x = design_matrix(feats)
+        self.mu = x.mean(axis=0)
+        self.sd = np.maximum(x.std(axis=0), SD_FLOORS)
+        xs = (x - self.mu) / self.sd
+        self.ym = targets.mean(axis=0)
+        a = xs.T @ xs + self.lam * np.eye(xs.shape[1])
+        self.w = np.linalg.solve(a, xs.T @ (targets - self.ym))
+        return self
+
+    def predict(self, feats):
+        x = design_matrix(np.atleast_2d(feats))
+        return ((x - self.mu) / self.sd) @ self.w + self.ym
+
+
+def lopo_error(feats, targets, groups, lam):
+    """Erreur absolue moyenne (x, y) en laissant à chaque fois une cible entière de côté."""
+    errs = []
+    for g in np.unique(groups):
+        tr, te = groups != g, groups == g
+        if tr.sum() < 20:
+            continue
+        model = GazeModel(lam).fit(feats[tr], targets[tr])
+        errs.append(np.abs(model.predict(feats[te]) - targets[te]))
+    return np.vstack(errs).mean(axis=0) if errs else np.full(2, np.nan)
+
+
+def reject_outliers(samples):
+    """Retire les échantillons aberrants (clignement partiel, saccade) d'une cible, sur fx/fy."""
+    med = np.median(samples[:, :2], axis=0)
+    mad = np.maximum(np.median(np.abs(samples[:, :2] - med), axis=0) * 1.4826, 0.003)
+    keep = np.all(np.abs(samples[:, :2] - med) <= 3.5 * mad, axis=1)
+    return samples[keep]
+
+
+def fallback_gaze(feats):
+    """Mapping approximatif avant calibration (le curseur bouge, mais sans précision)."""
+    return np.array([0.5 + FALLBACK_GAIN_X * feats[0], 0.5 + FALLBACK_GAIN_Y * feats[1]])
+
+
+class Calibration:
+    """Machine à états : affiche une cible à la fois, collecte les features, rejette les aberrants."""
+
+    def __init__(self):
+        self.targets = [
+            (CAL_MARGIN + (1 - 2 * CAL_MARGIN) * c / (CAL_COLS - 1),
+             CAL_MARGIN + (1 - 2 * CAL_MARGIN) * r / (CAL_ROWS - 1))
+            for r in range(CAL_ROWS) for c in range(CAL_COLS)
+        ]
+        random.shuffle(self.targets)  # ordre aléatoire : évite que l'œil anticipe la cible suivante
+        self.idx = 0
+        self.t0 = None
+        self.retries = 0
+        self.skipped = 0
+        self.cur = []
+        self.feats, self.targs, self.groups = [], [], []
+
+    @property
+    def done(self):
+        return self.idx >= len(self.targets)
+
+    @property
+    def target(self):
+        return self.targets[min(self.idx, len(self.targets) - 1)]
+
+    def phase_time(self, now):
+        return 0.0 if self.t0 is None else now - self.t0
+
+    def update(self, now, feats):
+        """feats = vecteur valide (visage, pas de clignement) ou None."""
+        if self.t0 is None:
+            self.t0 = now
+        t = now - self.t0
+        if CAL_SETTLE_S <= t < CAL_SETTLE_S + CAL_COLLECT_S:
+            if feats is not None:
+                self.cur.append(feats)
+        elif t >= CAL_SETTLE_S + CAL_COLLECT_S:
+            self._finish_point(now)
+
+    def _finish_point(self, now):
+        cur = np.array(self.cur) if self.cur else np.empty((0, len(FEATURE_NAMES)))
+        self.cur = []
+        if len(cur) >= CAL_MIN_SAMPLES:
+            cur = reject_outliers(cur)
+        if len(cur) >= CAL_MIN_SAMPLES:
+            tx, ty = self.target
+            self.feats.append(cur)
+            self.targs.append(np.tile([tx, ty], (len(cur), 1)))
+            self.groups.append(np.full(len(cur), self.idx))
+            self.idx += 1
+            self.retries = 0
+        elif self.retries < 2:
+            self.retries += 1  # on refait la même cible (visage perdu, clignements...)
+        else:
+            self.skipped += 1
+            self.idx += 1
+            self.retries = 0
+        self.t0 = now
+
+    def fit(self):
+        """Retourne (modèle, erreur train x/y, erreur LOPO x/y) ou None si trop peu de cibles."""
+        if len(self.feats) < CAL_MIN_POINTS:
+            return None
+        feats, targs, groups = np.vstack(self.feats), np.vstack(self.targs), np.concatenate(self.groups)
+        model = GazeModel(RIDGE_LAMBDA).fit(feats, targs)
+        train = np.abs(model.predict(feats) - targs).mean(axis=0)
+        cv = lopo_error(feats, targs, groups, RIDGE_LAMBDA)
+        return model, train, cv
+
+
+# --- Caméra / modèle --------------------------------------------------------------------------
 def ensure_model():
     if os.path.exists(MODEL_PATH):
         return
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     print(f"Téléchargement du modèle vers {MODEL_PATH} ...")
-    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    tmp = MODEL_PATH + ".part"
+    urllib.request.urlretrieve(MODEL_URL, tmp)
+    os.replace(tmp, MODEL_PATH)  # évite un fichier tronqué si le téléchargement est interrompu
     print("Terminé.")
+
+
+def draw_camera_overlay(image, lm, w, h, lines):
+    for eye in (EYE_A, EYE_B):
+        for i in eye["contour"]:
+            cv2.circle(image, (int(lm[i].x * w), int(lm[i].y * h)), 2, (0, 255, 0), -1)
+        cv2.circle(image, (int(lm[eye["iris"]].x * w), int(lm[eye["iris"]].y * h)), 3, (0, 0, 255), -1)
+        for k in ("outer", "inner"):
+            cv2.circle(image, (int(lm[eye[k]].x * w), int(lm[eye[k]].y * h)), 2, (255, 128, 0), -1)
+    for n, text in enumerate(lines):
+        cv2.putText(image, text, (10, 25 + 22 * n), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+
+
+def draw_canvas(gaze, cal, status, now):
+    ch, cw = CANVAS_SIZE
+    canvas = np.full((ch, cw, 3), 20, dtype=np.uint8)
+    for r in range(CAL_ROWS):  # repères discrets pour juger la précision à l'œil
+        for c in range(CAL_COLS):
+            x = int((CAL_MARGIN + (1 - 2 * CAL_MARGIN) * c / (CAL_COLS - 1)) * cw)
+            y = int((CAL_MARGIN + (1 - 2 * CAL_MARGIN) * r / (CAL_ROWS - 1)) * ch)
+            cv2.circle(canvas, (x, y), 3, (60, 60, 60), -1)
+
+    if cal is not None:
+        tx, ty = cal.target
+        center = (int(tx * cw), int(ty * ch))
+        total = CAL_SETTLE_S + CAL_COLLECT_S
+        frac = min(cal.phase_time(now) / total, 1.0)
+        collecting = cal.phase_time(now) >= CAL_SETTLE_S
+        cv2.circle(canvas, center, 30, (200, 200, 200), 2)
+        cv2.circle(canvas, center, max(3, int(26 * (1 - frac))), (0, 255, 0) if collecting else (0, 200, 255), -1)
+        cv2.putText(canvas, f"Calibration {min(cal.idx + 1, len(cal.targets))}/{len(cal.targets)}"
+                            " - fixe le point (Echap = annuler)", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    else:
+        gx = int(min(1.0, max(0.0, gaze[0])) * (cw - 1))
+        gy = int(min(1.0, max(0.0, gaze[1])) * (ch - 1))
+        cv2.circle(canvas, (gx, gy), CURSOR_RADIUS, (0, 255, 0), -1)
+        cv2.putText(canvas, f"({gaze[0]:.2f}, {gaze[1]:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (255, 255, 255), 1)
+        cv2.putText(canvas, status, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 255, 150), 1)
+        cv2.putText(canvas, "C = calibrer | Espace = recentrer | F = plein ecran | R = reset",
+                    (10, ch - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+    return canvas
 
 
 def main():
@@ -66,85 +356,126 @@ def main():
     options = FaceLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
         running_mode=RunningMode.VIDEO,
-        num_faces=1,
+        num_faces=1,  # le lissage temporel interne de MediaPipe n'est actif qu'avec 1 seul visage
         min_face_detection_confidence=0.5,
         min_face_presence_confidence=0.5,
         min_tracking_confidence=0.5,
+        output_face_blendshapes=True,
+        output_facial_transformation_matrixes=True,
     )
 
     cap = cv2.VideoCapture(0)
-    start = time.time()
+    if not cap.isOpened():
+        raise SystemExit("Impossible d'ouvrir la webcam (index 0).")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # évite d'accumuler du retard dans le buffer caméra
 
-    smoothed_rx, smoothed_ry = 0.5, 0.5
-    center_rx, center_ry = 0.5, 0.5  # position de référence, ajustée par la calibration (Espace)
+    cv2.namedWindow(CAM_WIN)
+    cv2.namedWindow(CURSOR_WIN, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(CURSOR_WIN, CANVAS_SIZE[1], CANVAS_SIZE[0])
+    fullscreen = False
 
+    filters = [OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF) for _ in range(2)]
+    raw_hist = deque(maxlen=20)
+    offset = np.zeros(2)
+    gaze = np.array([0.5, 0.5])
+    model, cal, status = None, None, "NON CALIBRE - appuie sur C"
+    blink_until, last_ts, fps, last_frame = 0.0, -1, 0.0, None
+    start = time.monotonic()
+
+    print(__doc__)
     with FaceLandmarker.create_from_options(options) as landmarker:
-        while cap.isOpened():
+        while True:
             success, image = cap.read()
             if not success:
                 break
 
-            # Inverser l'image pour un effet miroir et convertir en RGB (requis par MediaPipe)
-            image = cv2.flip(image, 1)
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-            timestamp_ms = int((time.time() - start) * 1000)
+            image = cv2.flip(image, 1)  # miroir ; les coins sont triés par x donc rien à inverser
+            h, w = image.shape[:2]
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-            # Traitement de l'image
-            result = landmarker.detect_for_video(mp_image, timestamp_ms)
+            now = time.monotonic()
+            ts = int((now - start) * 1000)
+            if ts <= last_ts:  # MediaPipe exige des timestamps strictement croissants
+                ts = last_ts + 1
+            last_ts = ts
+            if last_frame is not None:
+                fps = 0.9 * fps + 0.1 / max(now - last_frame, 1e-3)
+            last_frame = now
 
-            # Si un visage est détecté
+            result = landmarker.detect_for_video(mp_image, ts)
+
+            feats, blink, lines = None, 0.0, [f"FPS {fps:.0f}"]
             if result.face_landmarks:
-                mesh_points = result.face_landmarks[0]
-                h, w = image.shape[:2]
+                out = extract_features(result, w, h)
+                if out is not None:
+                    feats, blink = out
+                    lines += [f"blink {blink:.2f} (seuil {BLINK_THRESHOLD})",
+                              f"yaw {feats[4]:+.0f} pitch {feats[5]:+.0f}",
+                              f"fx {feats[0]:+.3f} fy {feats[1]:+.3f} bv {feats[2]:+.2f}"]
+                    draw_camera_overlay(image, result.face_landmarks[0], w, h, lines)
+            if feats is None:
+                cv2.putText(image, "Pas de visage", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-                # Récupérer les coordonnées de l'iris gauche
-                left_iris_points = [(int(mesh_points[p].x * w), int(mesh_points[p].y * h)) for p in LEFT_IRIS]
+            is_blink = blink > BLINK_THRESHOLD
+            if is_blink:
+                blink_until = now + BLINK_HOLD_S
+            usable = feats is not None and not is_blink and now >= blink_until
 
-                # Dessiner un cercle sur l'iris gauche
-                for point in left_iris_points:
-                    cv2.circle(image, point, 2, (0, 255, 0), -1)
+            if cal is not None:
+                cal.update(now, feats if usable else None)
+                if cal.done:
+                    fitted = cal.fit()
+                    if fitted is None:
+                        status = "Calibration echouee (trop peu de points) - recommence avec C"
+                        print(status)
+                    else:
+                        model, train, cv = fitted
+                        offset = np.zeros(2)
+                        raw_hist.clear()
+                        status = (f"CALIBRE - erreur validee: x {cv[0] * 100:.1f}% y {cv[1] * 100:.1f}% "
+                                  f"(train x {train[0] * 100:.1f}% y {train[1] * 100:.1f}%)")
+                        print(status + f" | cibles ignorees: {cal.skipped}")
+                    for f in filters:
+                        f.reset()
+                    cal = None
+            elif usable:
+                raw = model.predict(feats)[0] if model is not None else fallback_gaze(feats)
+                raw_hist.append(raw)
+                t = now - start
+                gaze = np.array([filters[0](raw[0] + offset[0], t), filters[1](raw[1] + offset[1], t)])
 
-                # Récupérer les coordonnées de l'iris droit
-                right_iris_points = [(int(mesh_points[p].x * w), int(mesh_points[p].y * h)) for p in RIGHT_IRIS]
+            cv2.imshow(CAM_WIN, image)
+            cv2.imshow(CURSOR_WIN, draw_canvas(gaze, cal, status, now))
 
-                # Dessiner un cercle sur l'iris droit
-                for point in right_iris_points:
-                    cv2.circle(image, point, 2, (0, 255, 0), -1)
-
-                # Calcul de la position de regard moyenne (les deux yeux), lissée dans le temps
-                lrx, lry = eye_ratio(mesh_points, LEFT_EYE)
-                rrx, rry = eye_ratio(mesh_points, RIGHT_EYE)
-                rx, ry = (lrx + rrx) / 2, (lry + rry) / 2
-
-                smoothed_rx += SMOOTHING * (rx - smoothed_rx)
-                smoothed_ry += SMOOTHING * (ry - smoothed_ry)
-
-            # Fenêtre "curseur" : un point qui suit le regard sur un canvas dédié
-            gained_rx = apply_gain(smoothed_rx, center_rx, GAIN_X)
-            gained_ry = apply_gain(smoothed_ry, center_ry, GAIN_Y)
-
-            canvas_h, canvas_w = CANVAS_SIZE
-            canvas = np.full((canvas_h, canvas_w, 3), 20, dtype=np.uint8)
-            cursor_x = int(gained_rx * canvas_w)
-            cursor_y = int((1.0 - gained_ry) * canvas_h)
-            cv2.circle(canvas, (cursor_x, cursor_y), CURSOR_RADIUS, (0, 255, 0), -1)
-            cv2.putText(canvas, f"({gained_rx:.2f}, {gained_ry:.2f})", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            cv2.putText(canvas, "Espace = calibrer", (10, canvas_h - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-
-            # Afficher les résultats
-            cv2.imshow('Eye Tracker', image)
-            cv2.imshow('Curseur', canvas)
-
-            # Quitter avec la touche 'Echap', calibrer avec 'Espace'
-            key = cv2.waitKey(5) & 0xFF
+            key = cv2.waitKey(1) & 0xFF
             if key == 27:
-                break
-            elif key == 32:
-                center_rx, center_ry = smoothed_rx, smoothed_ry
-                print(f"Calibré sur ({center_rx:.2f}, {center_ry:.2f})")
+                if cal is not None:
+                    cal = None
+                    status = "Calibration annulee"
+                else:
+                    break
+            elif key in (ord("c"), ord("C")):
+                cal = Calibration()
+                print("Calibration : garde la tete naturelle et suis chaque point des yeux.")
+            elif key == 32 and cal is None and raw_hist:
+                offset = 0.5 - np.mean(raw_hist, axis=0)
+                for f in filters:
+                    f.reset()
+                print("Recentre sur le milieu de la fenetre.")
+            elif key in (ord("r"), ord("R")):
+                model, cal, offset = None, None, np.zeros(2)
+                raw_hist.clear()
+                status = "NON CALIBRE - appuie sur C"
+                for f in filters:
+                    f.reset()
+            elif key in (ord("f"), ord("F")):
+                fullscreen = not fullscreen
+                cv2.setWindowProperty(CURSOR_WIN, cv2.WND_PROP_FULLSCREEN,
+                                      cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
 
     cap.release()
     cv2.destroyAllWindows()

@@ -14,10 +14,10 @@ ecran:
   plein_ecran: oui
   taille_fenetre: [1280, 720]    # largeur, hauteur (si pas en plein écran)
   grille: 2x2                    # lignes x colonnes de boutons centraux : 2x2 ou 2x3
-  largeur_bandes: 7              # largeur de chaque bande latérale, en % de la largeur de l'écran
+  largeur_bandes: 12              # largeur de chaque bande latérale, en % de la largeur de l'écran
   zone_morte:                    # zone centrale où le regard ne déclenche rien
-    largeur: 22                  # en % de la largeur de l'écran
-    hauteur: 34                  # en % de la hauteur de l'écran
+    largeur: 30                  # en % de la largeur de l'écran
+    hauteur: 40                  # en % de la hauteur de l'écran
     aplatissement_haut: 0        # 0 = ovale, 1 = dessus plat
   theme: sombre                  # sombre ou clair
   couleur_accent: "#4F8EF7"      # nom (bleu, vert, rouge, orange, violet, rose, jaune, turquoise...) ou "#RRGGBB"

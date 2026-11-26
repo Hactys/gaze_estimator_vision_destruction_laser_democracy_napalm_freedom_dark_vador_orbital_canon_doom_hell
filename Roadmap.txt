@@ -1,0 +1,4 @@
+A faire :
+
+-Recentrer à chaque clic en milieu de la cellule
+- euh... jsp quoi d'autre, un beau backend 

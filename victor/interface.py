@@ -477,11 +477,12 @@ class Rendu:
         return self.ecran.blit(surf, surf.get_rect(bottomleft=(self.d.marge, self.d.h - self.d.marge)))
 
     def dessiner_calibration(self, etat):
-        """etat = tracker.calibration_state() : (cible, fraction, en_collecte, index, total)."""
+        """etat = tracker.calibration_state() : (cible, fraction, en_collecte, index, total, consigne)."""
         ecran = self.ecran
         ecran.fill(self.t["fond"])
         if etat is not None:
-            (tx, ty), frac, collecte, idx, total = etat
+            (tx, ty), frac, collecte, idx, total, *reste = etat
+            consigne = reste[0] if reste else ("", "")
             x, y = round(tx * self.d.w), round(ty * self.d.h)
             R = self.r_anneau + 8
             pygame.gfxdraw.aacircle(ecran, x, y, R, self.t["piste"])
@@ -493,6 +494,10 @@ class Rendu:
             img = self.texte(f"Calibration {idx}/{total} — fixe le point   (Échap = annuler)",
                              self.petit, self.t["texte_doux"])
             ecran.blit(img, img.get_rect(midtop=(self.d.w // 2, self.d.marge)))
+            for k, ligne in enumerate(consigne):  # consigne au centre : aucune cible n'y est dessinée
+                if ligne:
+                    img = self.texte(ligne, self.petit, self.t["texte"])
+                    ecran.blit(img, img.get_rect(center=(self.d.w // 2, self.d.h // 2 + (k - 0.5) * 1.6 * img.get_height())))
         pygame.display.flip()
         self.tout, self.anim = True, None
 

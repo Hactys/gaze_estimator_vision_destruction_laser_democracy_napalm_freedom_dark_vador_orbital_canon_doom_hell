@@ -29,12 +29,12 @@ MODEL_URL = (
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "face_landmarker.task")
 
 # TODO : use outerer ones to achieve more precise tracking
-LEFT_EYE = {"outer": 33, "inner": 133, "top": 159, "bottom": 145, "iris": 468}
-RIGHT_EYE = {"outer": 263, "inner": 362, "top": 386, "bottom": 374, "iris": 473}
+LEFT_EYE = {"outer": 33, "inner": 133, "top": 27, "bottom": 23, "iris": 468}
+RIGHT_EYE = {"outer": 263, "inner": 362, "top": 258, "bottom": 253, "iris": 473}
 
 # Thresholds splitting the smoothed [0, 1] gaze ratio into 3 zones.
 H_SPLITS = (0.42, 0.58)
-V_SPLITS = (0.42, 0.58)
+V_SPLITS = (0.54, 0.58)
 
 SMOOTHING = 0.35          # exponential-moving-average weight for each new sample
 DWELL_SECONDS = 0.8       # how long gaze must stay on a cell to select it
@@ -54,7 +54,13 @@ def ensure_model():
 
 
 def eye_ratio(landmarks, eye):
-    """Where the iris sits inside this eye's own socket box, in [0, 1]x[0, 1]."""
+    """Where the iris sits inside this eye's own socket box, in [0, 1]x[0, 1].
+
+    Horizontal position is corner-to-corner as before. Vertical position is
+    measured against the outer->inner corner line rather than the top/bottom
+    lid landmarks, since the lids move during blinks while the corners stay
+    put: the eye looks up when the iris sits above that line.
+    """
     ox, oy = landmarks[eye["outer"]].x, landmarks[eye["outer"]].y
     ix, iy = landmarks[eye["inner"]].x, landmarks[eye["inner"]].y
     tx, ty = landmarks[eye["top"]].x, landmarks[eye["top"]].y
@@ -62,10 +68,15 @@ def eye_ratio(landmarks, eye):
     px, py = landmarks[eye["iris"]].x, landmarks[eye["iris"]].y
 
     x_lo, x_hi = min(ox, ix), max(ox, ix)
-    y_lo, y_hi = min(ty, by), max(ty, by)
-
     rx = (px - x_lo) / (x_hi - x_lo) if x_hi > x_lo else 0.5
-    ry = (py - y_lo) / (y_hi - y_lo) if y_hi > y_lo else 0.5
+
+    if ix != ox:
+        line_y = oy + (iy - oy) * (px - ox) / (ix - ox)
+    else:
+        line_y = (oy + iy) / 2
+    eye_height = max(abs(ty - by), 1e-6)
+    ry = 0.5 + (py - line_y) / eye_height
+    ry = min(max(ry, 0.0), 1.0)
     return rx, ry
 
 
@@ -73,6 +84,15 @@ def cell_for_ratio(rx, ry):
     col = 0 if rx < H_SPLITS[0] else (1 if rx < H_SPLITS[1] else 2)
     row = 0 if ry < V_SPLITS[0] else (1 if ry < V_SPLITS[1] else 2)
     return row, col
+
+
+def vertical_gaze(ry):
+    """Up/down/center label from the smoothed vertical ratio."""
+    if ry < V_SPLITS[0]:
+        return "UP"
+    if ry > V_SPLITS[1]:
+        return "DOWN"
+    return "CENTER"
 
 
 def draw_grid(current_cell, selected_cell, selected_until):
@@ -114,6 +134,7 @@ def main():
     dwell_selected = False
     selected_cell = None
     selected_until = 0.0
+    current_vertical = "CENTER"
 
     start = time.time()
     with FaceLandmarker.create_from_options(options) as landmarker:
@@ -139,6 +160,11 @@ def main():
                 smoothed_rx += SMOOTHING * (rx - smoothed_rx)
                 smoothed_ry += SMOOTHING * (ry - smoothed_ry)
 
+                vertical = vertical_gaze(smoothed_ry)
+                if vertical != current_vertical:
+                    current_vertical = vertical
+                    print(f"Gaze vertical: {current_vertical}")
+
                 cell = cell_for_ratio(smoothed_rx, smoothed_ry)
                 if cell != current_cell:
                     current_cell = cell
@@ -157,10 +183,13 @@ def main():
 
                 cv2.putText(frame, f"gaze ratio: ({smoothed_rx:.2f}, {smoothed_ry:.2f})", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                cv2.putText(frame, f"vertical: {current_vertical}", (10, 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
             else:
                 current_cell = None
                 dwell_start = None
                 dwell_selected = False
+                current_vertical = "CENTER"
                 cv2.putText(frame, "No face detected", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 

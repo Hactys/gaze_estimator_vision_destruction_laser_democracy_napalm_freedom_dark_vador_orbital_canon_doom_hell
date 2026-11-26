@@ -1,0 +1,132 @@
+# =============================================================================================
+#  Configuration de l'interface eye tracker
+# =============================================================================================
+#  Règles d'écriture :
+#   * TOUS les réglages sont optionnels : supprime une ligne et la valeur par défaut s'applique
+#     (les valeurs écrites ici SONT les valeurs par défaut, sauf pour les menus).
+#   * L'indentation se fait avec des ESPACES (jamais de tabulation).
+#   * Tout ce qui suit un # est un commentaire.
+#   * Oui / non s'écrivent : oui, non
+# =============================================================================================
+
+# ---- Écran ------------------------------------------------------------------------------------
+ecran:
+  plein_ecran: oui
+  taille_fenetre: [1280, 720]    # largeur, hauteur (si pas en plein écran)
+  grille: 2x2                    # lignes x colonnes de boutons centraux : 2x2 ou 2x3
+  largeur_bandes: 7              # largeur de chaque bande latérale, en % de la largeur de l'écran
+  zone_morte:                    # zone centrale où le regard ne déclenche rien
+    largeur: 22                  # en % de la largeur de l'écran
+    hauteur: 34                  # en % de la hauteur de l'écran
+    aplatissement_haut: 0        # 0 = ovale, 1 = dessus plat
+  theme: sombre                  # sombre ou clair
+  couleur_accent: "#4F8EF7"      # nom (bleu, vert, rouge, orange, violet, rose, jaune, turquoise...) ou "#RRGGBB"
+  taille_texte: 100              # en % de la taille normale
+  police: ""                     # chemin d'un fichier .ttf, vide = police du système
+  animations: oui                # glissement lors du changement de page
+
+# ---- Comportement -----------------------------------------------------------------------------
+reglages:
+  duree_clic: 2.0                # secondes à fixer un bouton pour le déclencher
+  retour_apres_action: non       # revenir au menu principal après une action faite dans un sous-menu
+  texte_retour: "← Retour"       # texte du bouton retour ajouté automatiquement à chaque sous-menu
+  duree_message: 1.5             # secondes d'affichage du message après une action
+
+# ---- Réglages avancés (à ne modifier que si nécessaire) ---------------------------------------
+avance:
+  camera: 0                      # numéro de la webcam
+  resolution_camera: [640, 480]  # plus bas = plus rapide, plus haut = plus précis
+  afficher_camera: non           # vignette caméra en bas à gauche (touche D)
+  images_par_seconde: 30         # fréquence de rafraîchissement de l'interface
+  seuil_clignement: 0.6          # 0 à 1 : au-dessus, on considère que l'œil est fermé
+  filtre_stabilite: 0.6          # plus bas = curseur plus stable mais plus lent
+  filtre_reactivite: 3.0         # plus haut = curseur plus réactif lors des grands mouvements
+  delai_perte_regard: 0.5        # secondes sans visage détecté avant d'annuler la sélection en cours
+
+# ---- Menus ------------------------------------------------------------------------------------
+#  Chaque menu est une liste de boutons ; « principal » est affiché au démarrage.
+#  Les boutons remplissent la grille dans le sens de lecture, page par page ; les bandes
+#  latérales font défiler les pages. Chaque sous-menu reçoit automatiquement un bouton Retour.
+#
+#  Un bouton :
+#    - texte: Copier               # texte affiché
+#      action: touches CTRL+C      # une action, ou une liste d'actions (voir ci-dessous)
+#      icone: icones/copier.png    # optionnel, chemin relatif à ce fichier
+#      couleur: vert               # optionnel
+#      duree_clic: 3               # optionnel, remplace reglages.duree_clic pour ce bouton
+#
+#  Actions disponibles :
+#    touches CTRL+C            raccourci clavier (plusieurs à la suite : touches CTRL+A CTRL+C)
+#                              touches spéciales : ENTREE ECHAP TAB ESPACE RETOUR_ARRIERE SUPPR
+#                              HAUT BAS GAUCHE DROITE DEBUT FIN PAGE_HAUT PAGE_BAS F1..F12
+#                              modificateurs : CTRL ALT MAJ SUPER ALTGR
+#    ecrire "texte"            tape un texte
+#    lancer firefox            lance un programme
+#    attendre 1.5              pause (secondes), utile dans une liste d'actions
+#    afficher "message"        affiche un message à l'écran
+#    ouvrir NomDuMenu          ouvre un sous-menu
+#    retour                    revient au menu précédent
+#    accueil                   revient au menu principal
+#    calibrer                  relance la calibration du regard (comme la touche C)
+#
+#  GPIO du Raspberry Pi (numéro BCM : « 17 » ou « GPIO17 », pas le numéro physique de la broche) :
+#    gpio_allumer 17           met la broche à l'état haut
+#    gpio_eteindre 17          met la broche à l'état bas
+#    gpio_basculer 17          allumée <-> éteinte
+#    gpio_impulsion 17 0.5     allume pendant 0.5 s puis éteint (ex : gâche électrique, sonnette)
+#    gpio_intensite 18 40      PWM de 0 à 100 % (ex : variateur de LED)
+#    gpio_lire 4 "Porte"       affiche l'état d'une entrée (le nom est optionnel)
+#
+#  Réseau local (« http:// » est ajouté automatiquement s'il manque ; délai maximum 3 s) :
+#    http_get 192.168.1.20/relay/0?turn=on          appelle une adresse
+#    http_post 192.168.1.20/api etat=on niveau=3    envoie {"etat": "on", "niveau": 3}
+#    http_put 192.168.1.20/api etat=off             idem en PUT
+#    http_lire 192.168.1.30/temperature "Salon"     affiche la réponse à l'écran (nom optionnel)
+#  Si une action échoue (appareil injoignable...), un message s'affiche et la suite de la liste
+#  d'actions du bouton n'est pas exécutée.
+menus:
+  principal:
+    - texte: Copier
+      action: touches CTRL+C
+    - texte: Coller
+      action: touches CTRL+V
+    - texte: Écrire bonjour
+      action: ecrire "Bonjour, comment ça va ?"
+    - texte: Raccourcis
+      action: ouvrir Raccourcis
+      couleur: violet
+    - texte: Oui
+      action: ecrire "Oui"
+      couleur: vert
+    - texte: Non
+      action: ecrire "Non"
+      couleur: rouge
+    - texte: Entrée
+      action: touches ENTREE
+    - texte: Effacer
+      action: touches RETOUR_ARRIERE
+    - texte: Tout sélectionner et copier
+      action: touches CTRL+A CTRL+C
+
+  Raccourcis:
+    - texte: Annuler
+      action: touches CTRL+Z
+      duree_clic: 3
+    - texte: Navigateur
+      action: ouvrir Navigateur
+      couleur: bleu
+    - texte: Recalibrer
+      action: calibrer
+      couleur: orange
+      duree_clic: 3
+
+  Navigateur:
+    - texte: Nouvel onglet
+      action: touches CTRL+T
+    - texte: Fermer l'onglet
+      action:
+        - afficher "Fermeture..."
+        - attendre 0.5
+        - touches CTRL+W
+    - texte: Page précédente
+      action: touches ALT+GAUCHE

@@ -1,0 +1,106 @@
+# =============================================================================================
+#  Configuration de l'interface eye tracker - format TOML
+#  (mêmes réglages que config.yaml ; la documentation complète des réglages et des actions s'y trouve)
+# =============================================================================================
+#  Règles d'écriture :
+#   * TOUS les réglages sont optionnels : supprime une ligne et la valeur par défaut s'applique.
+#   * Les textes sont entre guillemets : "comme ceci". Oui / non : true / false (ou "oui" / "non").
+#   * Une action contenant des guillemets s'écrit entre apostrophes : 'ecrire "Bonjour !"'
+#   * Chaque bouton commence par [[menus.NomDuMenu]].
+# =============================================================================================
+
+[ecran]
+plein_ecran = false
+taille_fenetre = [1280, 720]
+grille = "2x2"                 # 2x2 ou 2x3
+largeur_bandes = 7             # % de la largeur de l'écran
+theme = "sombre"               # sombre ou clair
+couleur_accent = "#4F8EF7"
+taille_texte = 100
+police = ""
+animations = true
+
+[ecran.zone_morte]
+largeur = 22                   # % de la largeur de l'écran
+hauteur = 34                   # % de la hauteur de l'écran
+aplatissement_haut = 0.5       # 0 = ovale, 1 = dessus plat
+
+[reglages]
+duree_clic = 2.0
+retour_apres_action = false
+texte_retour = "← Retour"
+duree_message = 1.5
+
+[avance]
+camera = 0
+resolution_camera = [640, 480]
+afficher_camera = false
+images_par_seconde = 30
+seuil_clignement = 0.6
+filtre_stabilite = 0.6
+filtre_reactivite = 3.0
+delai_perte_regard = 0.5
+
+# ---- Menu principal --------------------------------------------------------------------------
+[[menus.principal]]
+texte = "Copier"
+action = "touches CTRL+C"
+
+[[menus.principal]]
+texte = "Coller"
+action = "touches CTRL+V"
+
+[[menus.principal]]
+texte = "Écrire bonjour"
+action = 'ecrire "Bonjour, comment ça va ?"'
+
+[[menus.principal]]
+texte = "Raccourcis"
+action = "ouvrir Raccourcis"
+couleur = "violet"
+
+[[menus.principal]]
+texte = "Oui"
+action = 'ecrire "Oui"'
+couleur = "vert"
+
+[[menus.principal]]
+texte = "Non"
+action = 'ecrire "Non"'
+couleur = "rouge"
+
+[[menus.principal]]
+texte = "Entrée"
+action = "touches ENTREE"
+
+[[menus.principal]]
+texte = "Effacer"
+action = "touches RETOUR_ARRIERE"
+
+[[menus.principal]]
+texte = "Tout sélectionner et copier"
+action = "touches CTRL+A CTRL+C"
+
+# ---- Sous-menu Raccourcis --------------------------------------------------------------------
+[[menus.Raccourcis]]
+texte = "Annuler"
+action = "touches CTRL+Z"
+duree_clic = 3
+
+[[menus.Raccourcis]]
+texte = "Navigateur"
+action = "ouvrir Navigateur"
+couleur = "bleu"
+
+# ---- Sous-menu Navigateur --------------------------------------------------------------------
+[[menus.Navigateur]]
+texte = "Nouvel onglet"
+action = "touches CTRL+T"
+
+[[menus.Navigateur]]
+texte = "Fermer l'onglet"
+action = ['afficher "Fermeture..."', "attendre 0.5", "touches CTRL+W"]   # plusieurs actions à la suite
+
+[[menus.Navigateur]]
+texte = "Page précédente"
+action = "touches ALT+GAUCHE"

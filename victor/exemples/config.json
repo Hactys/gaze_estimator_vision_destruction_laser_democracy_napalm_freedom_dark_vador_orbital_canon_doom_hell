@@ -1,0 +1,107 @@
+{
+  "ecran": {
+    "plein_ecran": "non",
+    "taille_fenetre": [1280, 720],
+    "grille": "2x2",
+    "largeur_bandes": 7,
+    "zone_morte": {
+      "largeur": 22,
+      "hauteur": 34,
+      "aplatissement_haut": 0.5
+    },
+    "theme": "sombre",
+    "couleur_accent": "#4F8EF7",
+    "taille_texte": 100,
+    "police": "",
+    "animations": "oui"
+  },
+  "reglages": {
+    "duree_clic": 2.0,
+    "retour_apres_action": "non",
+    "texte_retour": "← Retour",
+    "duree_message": 1.5
+  },
+  "avance": {
+    "camera": 0,
+    "resolution_camera": [640, 480],
+    "afficher_camera": "non",
+    "images_par_seconde": 30,
+    "seuil_clignement": 0.6,
+    "filtre_stabilite": 0.6,
+    "filtre_reactivite": 3.0,
+    "delai_perte_regard": 0.5
+  },
+  "menus": {
+    "principal": [
+      {
+        "texte": "Copier",
+        "action": "touches CTRL+C"
+      },
+      {
+        "texte": "Coller",
+        "action": "touches CTRL+V"
+      },
+      {
+        "texte": "Écrire bonjour",
+        "action": "ecrire \"Bonjour, comment ça va ?\""
+      },
+      {
+        "texte": "Raccourcis",
+        "action": "ouvrir Raccourcis",
+        "couleur": "violet"
+      },
+      {
+        "texte": "Oui",
+        "action": "ecrire \"Oui\"",
+        "couleur": "vert"
+      },
+      {
+        "texte": "Non",
+        "action": "ecrire \"Non\"",
+        "couleur": "rouge"
+      },
+      {
+        "texte": "Entrée",
+        "action": "touches ENTREE"
+      },
+      {
+        "texte": "Effacer",
+        "action": "touches RETOUR_ARRIERE"
+      },
+      {
+        "texte": "Tout sélectionner et copier",
+        "action": "touches CTRL+A CTRL+C"
+      }
+    ],
+    "Raccourcis": [
+      {
+        "texte": "Annuler",
+        "action": "touches CTRL+Z",
+        "duree_clic": 3
+      },
+      {
+        "texte": "Navigateur",
+        "action": "ouvrir Navigateur",
+        "couleur": "bleu"
+      }
+    ],
+    "Navigateur": [
+      {
+        "texte": "Nouvel onglet",
+        "action": "touches CTRL+T"
+      },
+      {
+        "texte": "Fermer l'onglet",
+        "action": [
+          "afficher \"Fermeture...\"",
+          "attendre 0.5",
+          "touches CTRL+W"
+        ]
+      },
+      {
+        "texte": "Page précédente",
+        "action": "touches ALT+GAUCHE"
+      }
+    ]
+  }
+}

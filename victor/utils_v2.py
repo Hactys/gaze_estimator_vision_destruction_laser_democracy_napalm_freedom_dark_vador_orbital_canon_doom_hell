@@ -4,7 +4,9 @@ Même API que utils.GazeTracker (remplacer `from utils import GazeTracker` par
 `from utils_v2 import GazeTracker`), avec en plus :
   * calibration_hint       : consigne à afficher pendant la calibration (ou None) ;
   * head_pose              : (yaw, pitch, roll en degrés, distance en cm) ou None ;
-  * save_calibration(p) / load_calibration(p) : garder la calibration entre deux lancements.
+  * save_calibration(p) / load_calibration(p) : garder la calibration entre deux lancements ;
+  * add_calibration_point(cible) : recalibration continue (ex. à chaque clic), fenêtre glissante
+    de points dont le poids décroît exponentiellement avec les points suivants.
 
 Pourquoi la v1 perd la calibration quand la tête bouge
 -------------------------------------------------------
@@ -66,6 +68,14 @@ CAL_HEAD_SETTLE_S = 1.0
 CAL_HEAD_COLLECT_S = 4.5
 CAL_HEAD_MIN_SAMPLES = 30
 HEAD_GROUP_WEIGHT = 3.0  # poids d'une cible « tête en mouvement » relativement à une cible fixe
+
+# Recalibration continue (points ajoutés après la calibration, voir add_calibration_point)
+RECAL_WEIGHT = 1.0       # poids du point le plus récent (face à l'a priori qui ancre sur la calibration)
+RECAL_DECAY = 0.8        # à chaque nouveau point, le poids des précédents est multiplié par ce facteur
+RECAL_MAX_POINTS = 20    # taille de la fenêtre glissante
+RECAL_WINDOW_S = 0.5     # images prises avant l'instant du point
+RECAL_PARAMS = np.array([6, 13, 7, 15])   # offset θ, offset φ, gain θ, gain φ (voir P_TH / P_PH)
+RECAL_SIGMA = np.array([0.15, 0.15, 0.2, 0.2])  # a priori : rad pour les offsets, sans unité pour les gains
 
 FIT_SIGMA = 0.03        # bruit typique par échantillon (fraction de fenêtre), échelle de la perte robuste
 MODEL_MAX_FRAMES = 150  # images utilisées pour construire le modèle de tête
@@ -467,7 +477,9 @@ class GazeTracker:
     """
 
     def __init__(self, cam_index=0, resolution=(CAM_WIDTH, CAM_HEIGHT), blink_threshold=BLINK_THRESHOLD,
-                 min_cutoff=ONE_EURO_MIN_CUTOFF, beta=ONE_EURO_BETA, annotate=False, head_phase=True):
+                 min_cutoff=ONE_EURO_MIN_CUTOFF, beta=ONE_EURO_BETA, annotate=False, head_phase=True,
+                 recal_weight=RECAL_WEIGHT, recal_decay=RECAL_DECAY, recal_max_points=RECAL_MAX_POINTS,
+                 recal_window_s=RECAL_WINDOW_S):
         ensure_model()
         options = FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=MODEL_PATH),
@@ -506,6 +518,14 @@ class GazeTracker:
         self.start_time = time.monotonic()
         self._cmds = queue.Queue()
         self._thread, self._stop = None, threading.Event()
+
+        # recalibration continue (points ajoutés après la calibration, ex. à chaque clic)
+        self.recal_weight, self.recal_decay = recal_weight, recal_decay
+        self.recal_window_s = recal_window_s
+        self.base_model = None                             # modèle issu de la calibration (C)
+        self.recal_delta = np.zeros(len(RECAL_PARAMS))     # correction apprise sur les points ajoutés
+        self.recal_points = deque(maxlen=max(1, int(recal_max_points)))  # (mesures, cible brute)
+        self._recent = deque(maxlen=300)                   # (instant, mesure, bv) des dernières images
 
     # --- cycle de vie ---
     def start(self):
@@ -632,6 +652,8 @@ class GazeTracker:
             else:
                 raw = fallback_gaze(feats)
             self.raw_hist.append(raw)
+            if self.model is not None:
+                self._recent.append((now, obs, float(feats[2])))
             t = now - self.start_time
             self.gaze = np.array([self.filters[0](raw[0] + self.offset[0], t),
                                   self.filters[1](raw[1] + self.offset[1], t)])
@@ -655,6 +677,8 @@ class GazeTracker:
             print(self.status)
         else:
             self.head, self.model, train, cv, head_err = fitted
+            self.base_model = self.model
+            self._clear_recal()
             self.offset = np.zeros(2)
             self.raw_hist.clear()
             self.status = (f"CALIBRE 3D - erreur validee: x {cv[0] * 100:.1f}% y {cv[1] * 100:.1f}% "
@@ -672,6 +696,48 @@ class GazeTracker:
     def _reset_filters(self):
         for f in self.filters:
             f.reset()
+
+    def _clear_recal(self):
+        self.recal_points.clear()
+        self._recent.clear()
+        self.recal_delta = np.zeros(len(RECAL_PARAMS))
+        if self.base_model is not None:
+            self.model = self.base_model
+
+    # --- recalibration continue ---
+    def _refit_recal(self):
+        """Corrige le modèle de calibration à partir des points ajoutés (ex. clics).
+
+        La calibration (C) reste l'ancre : seuls 4 paramètres bougent (offset et gain des angles
+        œil/tête, donc une correction qui reste valable quand la tête bouge), avec un a priori qui
+        les ramène vers 0. Chaque point pèse recal_weight × recal_decay^âge (âge 0 = le plus récent :
+        moyenne exponentielle sur les clics), et la fenêtre glissante garde recal_max_points points.
+        """
+        if self.base_model is None or not self.recal_points:
+            return
+        points = list(self.recal_points)
+        obs = {k: np.concatenate([o[k] for o, _ in points]) for k in points[0][0]}
+        targets = np.vstack([np.tile(t, (len(o["ang"]), 1)) for o, t in points])
+        sw = np.sqrt(np.concatenate([
+            np.full(len(o["ang"]), self.recal_weight * self.recal_decay ** (len(points) - 1 - i) / len(o["ang"]))
+            for i, (o, _) in enumerate(points)]))
+        p_base = self.base_model.p
+
+        def residuals(d):
+            p = p_base.copy()
+            p[RECAL_PARAMS] += d
+            r = ((GeoGazeModel.predict_with(p, obs) - targets) / FIT_SIGMA).ravel()
+            r = np.sign(r) * np.sqrt(2.0 * (np.sqrt(1.0 + r * r) - 1.0))
+            return np.concatenate([r * np.repeat(sw, 2), d / RECAL_SIGMA])
+
+        try:
+            self.recal_delta = levenberg_marquardt(residuals, self.recal_delta.copy(), iters=15)
+        except (np.linalg.LinAlgError, ValueError) as e:
+            print(f"Recalibration : erreur d'ajustement ({e})")
+            return
+        p = p_base.copy()
+        p[RECAL_PARAMS] += self.recal_delta
+        self.model = GeoGazeModel(p)
 
     # --- commandes (thread-safe : exécutées par le thread du tracker) ---
     def start_calibration(self):
@@ -694,8 +760,29 @@ class GazeTracker:
                 print("Recentre sur le milieu de la fenetre.")
         self._cmds.put(cmd)
 
+    def add_calibration_point(self, target, t=None):
+        """Ajoute un point de recalibration : `target` (x, y normalisé, dans la fenêtre) est ce que
+        l'utilisateur regardait pendant les recal_window_s secondes avant l'instant t (défaut :
+        maintenant). Exécuté par le thread du tracker (quelques ms)."""
+        t = time.monotonic() if t is None else t
+        target = np.asarray(target, dtype=float)
+
+        def cmd():
+            if self.base_model is None or self.cal is not None:
+                return
+            recent = [(o, bv) for ts, o, bv in self._recent if t - self.recal_window_s <= ts <= t]
+            if len(recent) < 3:
+                return
+            obs = stack_obs([o for o, _ in recent], [bv for _, bv in recent])
+            # le modèle prédit le regard avant le décalage de recentrage : on retire ce décalage
+            self.recal_points.append((obs, target - self.offset))
+            self._refit_recal()
+        self._cmds.put(cmd)
+
     def reset(self):
         def cmd():
+            self.base_model = None
+            self._clear_recal()
             self.head, self.model, self.cal, self.offset = None, None, None, np.zeros(2)
             self.raw_hist.clear()
             self.status = "NON CALIBRE - appuie sur C"
@@ -709,7 +796,7 @@ class GazeTracker:
                 print("Rien a sauvegarder : pas de calibration.")
                 return
             np.savez(path, pts=self.head.pts, eyes=self.head.eyes, f_ratio=self.cam.f / self.cam.w,
-                     params=self.model.p)
+                     params=self.base_model.p)
             print(f"Calibration sauvegardee dans {path}")
         self._cmds.put(cmd)
 
@@ -725,7 +812,8 @@ class GazeTracker:
                                   int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
             self.cam.f = float(d["f_ratio"]) * self.cam.w
             self.head = HeadModel(d["pts"], d["eyes"], self.cam)
-            self.model = GeoGazeModel(d["params"])
+            self.model = self.base_model = GeoGazeModel(d["params"])
+            self._clear_recal()
             self.offset = np.zeros(2)
             self.raw_hist.clear()
             self._reset_filters()

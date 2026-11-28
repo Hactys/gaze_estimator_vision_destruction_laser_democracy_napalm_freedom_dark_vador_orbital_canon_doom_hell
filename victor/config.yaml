@@ -42,6 +42,14 @@ avance:
   filtre_stabilite: 0.6          # plus bas = curseur plus stable mais plus lent
   filtre_reactivite: 3.0         # plus haut = curseur plus réactif lors des grands mouvements
   delai_perte_regard: 0.5        # secondes sans visage détecté avant d'annuler la sélection en cours
+  # Recalibration au clic (main_v2) : chaque clic sur une case devient un point de calibration,
+  # placé entre le centre de la case et l'endroit où était le regard.
+  recalibration_clic: oui         # activer / désactiver
+  recalibration_part_centre: 0.65 # 0 à 1 : 1 = centre de la case, 0 = position du regard au clic
+  recalibration_poids: 1.0        # poids du dernier clic, comparé à un point de la calibration (C)
+  recalibration_oubli: 0.85       # 0 à 1 : à chaque clic, le poids des clics précédents est multiplié par ce facteur
+  recalibration_points_max: 20    # nombre de clics gardés (fenêtre glissante)
+  recalibration_fenetre: 0.4      # secondes de regard avant le clic utilisées pour le point
 
 # ---- Menus ------------------------------------------------------------------------------------
 #  Chaque menu est une liste de boutons ; « principal » est affiché au démarrage.

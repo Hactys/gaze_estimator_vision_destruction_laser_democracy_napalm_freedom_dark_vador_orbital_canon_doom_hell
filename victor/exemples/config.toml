@@ -40,6 +40,12 @@ seuil_clignement = 0.6
 filtre_stabilite = 0.6
 filtre_reactivite = 3.0
 delai_perte_regard = 0.5
+recalibration_clic = true          # chaque clic sur une case devient un point de calibration (main_v2)
+recalibration_part_centre = 0.5    # 0 à 1 : 1 = centre de la case, 0 = position du regard au clic
+recalibration_poids = 1.0          # poids du dernier clic, comparé à un point de la calibration
+recalibration_oubli = 0.8          # à chaque clic, le poids des clics précédents est multiplié par ce facteur
+recalibration_points_max = 20      # nombre de clics gardés (fenêtre glissante)
+recalibration_fenetre = 0.5        # secondes de regard avant le clic utilisées pour le point
 
 # ---- Menu principal --------------------------------------------------------------------------
 [[menus.principal]]

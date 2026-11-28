@@ -29,7 +29,13 @@
     "seuil_clignement": 0.6,
     "filtre_stabilite": 0.6,
     "filtre_reactivite": 3.0,
-    "delai_perte_regard": 0.5
+    "delai_perte_regard": 0.5,
+    "recalibration_clic": "oui",
+    "recalibration_part_centre": 0.5,
+    "recalibration_poids": 1.0,
+    "recalibration_oubli": 0.8,
+    "recalibration_points_max": 20,
+    "recalibration_fenetre": 0.5
   },
   "menus": {
     "principal": [

@@ -45,6 +45,12 @@ DEFAUTS = {
         "filtre_stabilite": 0.6,
         "filtre_reactivite": 3.0,
         "delai_perte_regard": 0.5,
+        "recalibration_clic": True,
+        "recalibration_part_centre": 0.5,
+        "recalibration_poids": 1.0,
+        "recalibration_oubli": 0.8,
+        "recalibration_points_max": 20,
+        "recalibration_fenetre": 0.5,
     },
 }
 
@@ -62,6 +68,11 @@ BORNES = {
     "avance.filtre_stabilite": (0.01, 10),
     "avance.filtre_reactivite": (0, 100),
     "avance.delai_perte_regard": (0, 10),
+    "avance.recalibration_part_centre": (0, 1),
+    "avance.recalibration_poids": (0, 20),
+    "avance.recalibration_oubli": (0, 1),
+    "avance.recalibration_points_max": (1, 200),
+    "avance.recalibration_fenetre": (0.05, 5),
 }
 CHOIX = {"ecran.theme": ("sombre", "clair")}
 

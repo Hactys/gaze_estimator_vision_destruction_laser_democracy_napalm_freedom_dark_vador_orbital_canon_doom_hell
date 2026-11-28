@@ -159,7 +159,10 @@ def main():
         av = cfg.avance
         tracker = GazeTracker(cam_index=av.camera, resolution=tuple(int(v) for v in av.resolution_camera),
                               blink_threshold=av.seuil_clignement, min_cutoff=av.filtre_stabilite,
-                              beta=av.filtre_reactivite, annotate=av.afficher_camera)
+                              beta=av.filtre_reactivite, annotate=av.afficher_camera,
+                              recal_weight=av.recalibration_poids, recal_decay=av.recalibration_oubli,
+                              recal_max_points=int(av.recalibration_points_max),
+                              recal_window_s=av.recalibration_fenetre)
     tracker.start()
 
     lignes, colonnes = cfg.ecran.grille
@@ -267,6 +270,12 @@ def main():
                     rendu.glisser(sens)
                 else:
                     bouton = boutons[cible]
+                    if cfg.avance.recalibration_clic and not souris and tracker.calibrated:
+                        # point de calibration entre le centre de la case et le regard au moment du clic
+                        cx, cy = rendu.d.cartes[cible].center
+                        a = cfg.avance.recalibration_part_centre
+                        tracker.add_calibration_point(((a * cx + (1 - a) * gx) / (w - 1),
+                                                       (a * cy + (1 - a) * gy) / (h - 1)), now)
                     executeur.lancer(bouton.etapes)
                     if not bouton.navigue:
                         rendu.message(bouton.texte or "Action")

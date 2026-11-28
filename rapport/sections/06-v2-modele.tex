@@ -1,0 +1,274 @@
+\chapter{Tracker v2 : modèle de regard et calibration}
+\label{chap:v2mod}
+
+Le chapitre~\ref{chap:v2geo} a produit, pour chaque image, une origine $\vect{O}$ (cm, repère caméra), une rotation de la tête $R$ et deux angles œil/tête $(\theta, \varphi)$. \code{GeoGazeModel} transforme ces mesures en un point $(x, y)$ de la fenêtre, à l'aide de 23 paramètres appris à la calibration.
+
+\section{Paramètres}
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}c l L@{}}
+\toprule
+Indices & Nom du bloc & Rôle \\
+\midrule
+0--5 & \code{P_SCREEN} & application affine du plan de l'écran (cm) vers la fenêtre ($[0,1]^2$) \\
+6--12 & \code{P_TH} & 7 coefficients de correction de l'angle horizontal $\theta$ \\
+13--19 & \code{P_PH} & 7 coefficients de correction de l'angle vertical $\varphi$ \\
+20--21 & \code{P_TILT} & inclinaison du plan de l'écran autour des axes $x$ et $y$ de la caméra (rad) \\
+22 & \code{P_KF} & $k_f$, logarithme du facteur de correction de focale / distance \\
+\bottomrule
+\end{tabularx}
+\caption{Les 23 paramètres de \code{GeoGazeModel} (\code{N_PARAMS = 23}).}
+\end{table}
+
+\section{Prédiction}
+
+\code{predict_with(p, obs)} est entièrement vectorisée : elle traite d'un coup $N$ observations empilées par \code{stack_obs}, ce qui permet d'évaluer rapidement le modèle sur toute la calibration.
+
+\subsection{Correction des angles}
+\label{sec:correction-angles}
+
+Avec la base de 7 fonctions (\code{_basis}, \code{N_BASIS = 7})
+\begin{equation}
+  \vect{f}(\theta, \varphi, b_v) = \big(1,\ \theta,\ \varphi,\ \theta^2,\ \varphi^2,\ \theta\varphi,\ b_v\big),
+\end{equation}
+les angles corrigés sont
+\begin{equation}
+  \theta' = \theta + \vect{f}\cdot\vect{p}_{6..12}, \qquad \varphi' = \varphi + \vect{f}\cdot\vect{p}_{13..19}.
+\end{equation}
+
+Chaque terme a une interprétation physique :
+\begin{description}
+  \item[Constante ($p_6$, $p_{13}$) : angle kappa.] L'axe optique de l'œil (centre du globe $\to$ pupille), que mesure le modèle, ne coïncide pas avec l'axe \emph{visuel} (fovéa $\to$ point fixé). L'écart, appelé angle kappa, vaut typiquement \ang{4} à \ang{5} horizontalement et environ \ang{1} à \ang{2} verticalement, et varie d'une personne à l'autre \cite{guestrin2006,hansen2010}. S'y ajoutent les biais du modèle géométrique (centre du globe approximatif).
+  \item[Gains ($p_7$ pour $\theta$, $p_{15}$ pour $\varphi$).] $\theta' \approx (1 + p_7)\,\theta$ : corrige l'erreur sur le rayon du globe (section~\ref{sec:headmodel}) et le biais de localisation de l'iris par MediaPipe, qui a tendance à \enquote{sous-estimer} les grandes excursions.
+  \item[Termes croisés ($p_8$ : $\varphi \to \theta$, $p_{14}$ : $\theta \to \varphi$).] Une petite rotation (roll) entre le repère de la tête estimé et le repère réel des yeux mélange les deux axes.
+  \item[Termes quadratiques ($p_{9..11}$, $p_{16..18}$).] Ils absorbent les non-linéarités résiduelles : forme non sphérique de la cornée, biais de MediaPipe en bord d'orbite.
+  \item[Blendshapes $b_v$ ($p_{12}$, $p_{19}$).] Le score $b_v = \text{lookDown} - \text{lookUp}$ apporte une information verticale indépendante de la position de l'iris. Celle-ci est peu précise verticalement, car l'iris est en partie masqué par les paupières.
+\end{description}
+
+\subsection{Direction du regard}
+
+La direction unitaire correspondant à $(\theta', \varphi')$ dans le repère tête, puis dans le repère caméra :
+\begin{equation}
+  \vect{g}_h = \big(\cos\varphi'\sin\theta',\ \sin\varphi',\ -\cos\varphi'\cos\theta'\big), \qquad \vect{g} = R\,\vect{g}_h .
+\end{equation}
+C'est l'inverse exact de la définition des angles de la section~\ref{sec:observe}. Pour $\theta' = \varphi' = 0$, $\vect{g}_h = (0, 0, -1)$ : regard droit devant.
+
+\subsection{Correction de distance}
+\label{sec:focale}
+
+\begin{equation}
+  \vect{O}' = \big(O_x,\ O_y,\ e^{k_f} O_z\big).
+\end{equation}
+
+\paragraph{Pourquoi corriger seulement $O_z$ ?} Supposons que la focale réelle vaille $\kappa$ fois la focale supposée. Pour une tête de taille fixe (l'IPD), la distance estimée est $Z \propto f\cdot\text{IPD}/\text{IPD}_\text{px}$ : elle est fausse du même facteur $\kappa$. En revanche, les coordonnées latérales $X = (u - c_x)\,Z / f$ ne changent pas, puisque le rapport $Z/f$ est conservé. Au premier ordre, une erreur de focale revient donc exactement à multiplier la seule composante $z$ de l'origine par un facteur constant. Le logarithme $k_f$ rend ce facteur positif par construction et symétrique ($k_f = \pm\num{0.3}$ correspond à $\times\num{1.35}$ ou $\times\num{0.74}$).
+
+\subsection{Plan de l'écran}
+
+La webcam est fixée au bord de l'écran. On modélise donc l'écran par un plan \emph{passant par le centre optique} de la caméra, de normale
+\begin{equation}
+  \vect{n} = R_s\,\vect{e}_z, \qquad R_s = R_x(\tau_1)\,R_y(\tau_2), \qquad (\tau_1, \tau_2) = (p_{20}, p_{21}).
+\end{equation}
+Sans inclinaison, le plan de l'écran est le plan $z = 0$ de la caméra, perpendiculaire à l'axe optique. C'est le cas d'une caméra intégrée qui regarde droit devant. Les deux angles d'inclinaison modélisent une webcam posée en biais, ou un écran de portable incliné par rapport à sa caméra.
+
+Le point d'impact du rayon $\vect{O}' + t\,\vect{g}$ sur le plan $\vect{n}\cdot\vect{X} = 0$ est
+\begin{equation}
+  t = -\frac{\vect{O}'\cdot\vect{n}}{\vect{g}\cdot\vect{n}}, \qquad \vect{X}_\text{écran} = \vect{O}' + t\,\vect{g}.
+\end{equation}
+L'utilisateur est devant l'écran ($\vect{O}'\cdot\vect{n} > 0$) et regarde vers lui : $\vect{g}\cdot\vect{n} < 0$. Si le regard est presque parallèle à l'écran, ou s'en éloigne (mesure aberrante, ou paramètres en cours d'ajustement), le dénominateur est borné : $\vect{g}\cdot\vect{n} \leftarrow \min(\vect{g}\cdot\vect{n}, \num{-0.01})$. Cela évite une division par zéro, ou un point projeté \emph{derrière} l'utilisateur, qui déstabiliserait l'ajustement.
+
+Les coordonnées dans le plan, en cm, sont les projections sur les deux autres axes de $R_s$ :
+\begin{equation}
+  a = \vect{X}_\text{écran}\cdot R_s\vect{e}_x, \qquad b = \vect{X}_\text{écran}\cdot R_s\vect{e}_y .
+\end{equation}
+
+\subsection{Application affine vers la fenêtre}
+
+\begin{equation}
+  x = p_0\,a + p_1\,b + p_2, \qquad y = p_3\,a + p_4\,b + p_5 .
+\end{equation}
+Cette application encode tout ce que l'on ignore de l'installation : taille physique de la fenêtre (conversion cm $\to$ fraction de fenêtre), position de la fenêtre par rapport à la caméra, petite rotation ou cisaillement résiduel. Elle n'a pas d'a priori : les 16 cibles de calibration, réparties sur toute la fenêtre, la déterminent très bien.
+
+\section{Ajustement}
+
+\subsection{Fonction de coût}
+
+Avec $N$ observations $(\text{obs}_i, \vect{y}_i, \omega_i)$, \code{GeoGazeModel.fit} minimise
+\begin{equation}
+  J(\vect{p}) = \sum_{i=1}^{N} \omega_i \sum_{c\in\{x,y\}} \rho\!\left(\frac{\hat y_{ic}(\vect{p}) - y_{ic}}{\sigma_\text{fit}}\right)
+   + \sum_{j \in \mathcal{P}} \left(\frac{p_j}{\sigma_j}\right)^2,
+  \qquad \rho(r) = 2\big(\sqrt{1 + r^2} - 1\big),
+\end{equation}
+où $\mathcal{P}$ est l'ensemble des 17 paramètres munis d'un a priori : les 14 corrections d'angle, les deux inclinaisons et $k_f$.
+
+\paragraph{Mise en œuvre.} L'algorithme de Levenberg-Marquardt minimise une somme de carrés $\|\vect{r}\|^2$. On fournit donc le vecteur
+\begin{equation}
+  \vect{r}(\vect{p}) = \Big[\ \sqrt{\omega_i}\,\sign(r_{ic})\sqrt{\rho(r_{ic})}\ \Big]_{i,c} \ \oplus\ \Big[\ p_j/\sigma_j\ \Big]_{j\in\mathcal P},
+  \qquad r_{ic} = \frac{\hat y_{ic} - y_{ic}}{\sigma_\text{fit}},
+\end{equation}
+de sorte que $\|\vect{r}\|^2 = J$. Le facteur $\sign(\cdot)$ préserve le signe du résidu, ce qui garde une jacobienne régulière autour de 0.
+
+\subsection{Perte soft-L1}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.62\textwidth, height=5.2cm, xmin=-5, xmax=5, ymin=0, ymax=10, samples=200,
+  xlabel={résidu normalisé $r$}, ylabel={coût}, legend style={font=\small, at={(0.5,0.97)}, anchor=north},
+  grid=major, grid style={black!8}, tick label style={font=\small}]
+  \addplot[thick, doux, dashed, domain=-5:5] {x^2}; \addlegendentry{$r^2$ (moindres carrés)}
+  \addplot[very thick, accent, domain=-5:5] {2*(sqrt(1+x^2)-1)}; \addlegendentry{$\rho(r)$ soft-L1}
+\end{axis}
+\end{tikzpicture}
+\caption{La perte soft-L1 est quadratique près de 0 et linéaire au-delà de $|r| \approx 1$, c'est-à-dire d'une erreur d'environ $\sigma_\text{fit}$.}
+\end{figure}
+
+Pour $|r| \ll 1$, $\rho(r) \approx r^2$ : on retrouve les moindres carrés. Pour $|r| \gg 1$, $\rho(r) \approx 2|r|$ : la perte devient linéaire, comme une norme $L^1$. La fonction d'influence $\psi(r) = \tfrac12\rho'(r) = r/\sqrt{1 + r^2}$ est bornée par 1 : un échantillon aberrant (saccade non filtrée, mauvaise détection) ne peut pas tirer le modèle plus fort qu'un échantillon à $\approx 1\,\sigma_\text{fit}$. C'est la même perte que l'option \code{loss='soft_l1'} de SciPy, avec une échelle de \num{1} appliquée au résidu déjà normalisé.
+
+\begin{origine}
+\code{FIT_SIGMA = 0.03} (\empi) : bruit typique d'un échantillon, en fraction de fenêtre. C'est l'ordre de grandeur de la dispersion du regard brut pendant une fixation avec une webcam. Il fixe à la fois l'échelle de transition de la perte soft-L1 et le poids relatif des données face aux a priori.
+\end{origine}
+
+\subsection{A priori et interprétation bayésienne}
+
+Si les erreurs étaient gaussiennes d'écart-type $\sigma_\text{fit}$ et si chaque paramètre suivait une loi a priori $\mathcal N(0, \sigma_j^2)$, minimiser $J$ (avec $\rho(r) = r^2$) reviendrait exactement à trouver le maximum a posteriori. Le coût a la forme $-2\log p(\text{données}\mid\vect{p}) - 2\log p(\vect{p})$ à une constante près, et les deux termes ont le même facteur. Les a priori ramènent vers 0 (aucune correction, géométrie nominale) les paramètres que les données déterminent mal.
+
+\paragraph{Ordre de grandeur.} Les poids sont normalisés à une moyenne de 1 : le terme de données vaut environ $N \approx \num{1000}$ fois un résidu typique, contre 17 termes d'a priori. Ces a priori sont donc \emph{faibles}, comme l'indique la documentation du module. Ils ne pèsent que dans les directions où les données ne contraignent presque rien, par exemple un échange entre inclinaison de l'écran et application affine.
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l c c L@{}}
+\toprule
+Paramètre & $\sigma_j$ ($\theta$) & $\sigma_j$ ($\varphi$) & Interprétation (\empi, ordres de grandeur physiques) \\
+\midrule
+constante (kappa) & \num{0.15} & \num{0.15} & \qty{0.15}{\radian} $\approx$ \ang{8.6} : couvre largement l'angle kappa (\ang{4}--\ang{5}) et les biais du modèle. \\
+gain propre & \num{0.5} & \num{0.6} & \qtyrange{50}{60}{\percent} d'erreur de gain tolérés sans effort : le rayon du globe et le biais de MediaPipe sont incertains. Le vertical est moins bien mesuré, d'où une tolérance plus grande. \\
+terme croisé & \num{0.2} & \num{0.2} & couplage $\theta \leftrightarrow \varphi$ de \qty{20}{\percent} : correspond à un roll de $\approx$ \ang{11}. \\
+quadratiques & 1 & 1 & quasi libres : les courbures sont mal connues a priori. \\
+$b_v$ & \num{0.2} & \num{0.4} & le score vertical ne devrait guère influencer l'horizontal ; il est plus utile en vertical. \\
+\midrule
+inclinaisons $\tau_1, \tau_2$ & \multicolumn{2}{c}{\num{0.35}} & \qty{0.35}{\radian} $\approx$ \ang{20} : inclinaison plausible d'une webcam ou d'un écran de portable. \\
+$k_f$ & \multicolumn{2}{c}{\num{0.3}} & facteur de distance entre $\times\num{0.74}$ et $\times\num{1.35}$ à $1\sigma$ : couvre un HFOV réel de \ang{45} à \ang{75} environ. \\
+affine & \multicolumn{2}{c}{$\infty$} & aucun a priori : bien déterminée par les cibles. \\
+\bottomrule
+\end{tabularx}
+\caption{A priori \code{PRIOR_SIGMA}. Les angles sont en radians, les gains sans unité.}
+\end{table}
+
+\subsection{Point de départ}
+
+L'algorithme de Levenberg-Marquardt ne trouve que des minima locaux ; il faut un bon point de départ. \code{fit} l'obtient en deux temps :
+\begin{enumerate}
+  \item toutes les corrections, inclinaisons et $k_f$ sont mis à 0, et l'affine à l'identité. Le modèle prédit alors les coordonnées $(a, b)$ du point dans le plan de l'écran, en cm, selon la géométrie nominale ;
+  \item on résout le \emph{sous-problème linéaire} des 6 paramètres affines par moindres carrés pondérés : $[\,a_i\ \ b_i\ \ 1\,]\,C \approx \vect{y}_i$, avec $C \in \R^{3\times2}$.
+\end{enumerate}
+Le départ correspond donc déjà à la meilleure correspondance affine entre la géométrie nominale et les cibles, et l'optimisation non linéaire n'a plus qu'à affiner.
+
+\subsection{Algorithme de Levenberg-Marquardt}
+
+Le code n'importe pas SciPy ; \code{levenberg_marquardt} est une implémentation autonome, qui évite une dépendance lourde sur Raspberry Pi.
+
+\begin{algorithm}[H]
+\caption{\code{levenberg_marquardt(fun, p, iters, tol)}}
+$\vect{r} \leftarrow \text{fun}(\vect{p})$ ; \ $C \leftarrow \|\vect{r}\|^2$ ; \ $\mu \leftarrow 10^{-3}$\;
+\For{$k = 1..\text{iters}$}{
+  \For(\tcp*[f]{jacobienne par différences finies avant}){$j = 1..\dim \vect{p}$}{
+    $h_j \leftarrow 10^{-6}\max(1, |p_j|)$ ; \quad $J_{:,j} \leftarrow \big(\text{fun}(\vect{p} + h_j\vect{e}_j) - \vect{r}\big)/h_j$\;
+  }
+  $A \leftarrow J\T J$ ; \ $\vect{g} \leftarrow J\T\vect{r}$ ; \ $D \leftarrow \diag(A) + 10^{-9}$\;
+  \Repeat{$C' < C$ \textbf{et} $C'$ fini}{
+    $\vect{p}' \leftarrow \vect{p} - (A + \mu\,\diag(D))^{-1}\vect{g}$ ; \ $C' \leftarrow \|\text{fun}(\vect{p}')\|^2$\;
+    \lIf{échec}{$\mu \leftarrow 4\mu$ ; \lIf{$\mu > 10^{10}$}{\Return $\vect{p}$}}
+  }
+  $\text{fini} \leftarrow (C - C' < \text{tol}\cdot C)$\;
+  $\vect{p} \leftarrow \vect{p}'$ ; \ $C \leftarrow C'$ ; \ $\mu \leftarrow \max(\mu/3, 10^{-9})$\;
+  \lIf{fini}{\textbf{arrêter}}
+}
+\Return $\vect{p}$
+\end{algorithm}
+
+\paragraph{Principe.} À chaque itération, on linéarise les résidus, $\vect{r}(\vect{p} + \vect\delta) \approx \vect{r} + J\vect\delta$, et on résout le problème de Gauss-Newton amorti
+\begin{equation}
+  \big(J\T J + \mu\,\diag(J\T J)\big)\,\vect\delta = -J\T\vect{r}.
+\end{equation}
+Pour $\mu \to 0$, c'est un pas de Gauss-Newton, rapide près du minimum. Pour $\mu$ grand, c'est une petite descente de gradient, sûre loin du minimum. $\mu$ diminue après chaque pas réussi et augmente après chaque échec \cite{levenberg1944,marquardt1963}.
+
+\paragraph{Choix d'implémentation.}
+\begin{itemize}
+  \item \textbf{Amortissement de Marquardt} $\mu\,\diag(J\T J)$ plutôt que $\mu I$ : le pas est invariant à l'échelle des paramètres. C'est important ici, où des gains sans unité côtoient des coefficients affines de l'ordre de \num{0.03} par cm (l'inverse de la largeur d'un écran d'environ \qty{30}{\centi\metre}). Le terme $10^{-9}$ évite une diagonale nulle pour un paramètre inactif.
+  \item \textbf{Différences finies} avec un pas relatif $10^{-6}$, de l'ordre de la racine de la précision machine ($\sqrt{\epsilon} \approx \num{1.5e-8}$) multipliée par une marge pour le bruit d'arrondi. Le modèle est trop imbriqué (rotations, intersections) pour que l'écriture d'une jacobienne analytique en vaille la peine.
+  \item \textbf{Facteurs $\times4$ et $/3$} (\empi) : valeurs proches des usages courants (souvent $\times10$ et $/10$). Une remontée plus douce évite des pas trop timides après un échec isolé.
+  \item \textbf{Arrêt} quand la baisse relative du coût passe sous $10^{-8}$, ou après \code{iters} itérations (60 pour la calibration, 15 pour la recalibration, 3 pour la validation croisée).
+\end{itemize}
+
+\section{Calibration v2}
+
+\subsection{Protocole en deux phases}
+
+\code{Calibration3D} enchaîne deux phases (tableau~\ref{tab:cal3d}).
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l L L l@{}}
+\toprule
+ & Tête fixe & Tête en mouvement & Origine \\
+\midrule
+Cibles & 16 (grille $4\times4$, ordre aléatoire) & 3 : $(\frac12, \frac12)$, $(\frac14, \num{0.3})$, $(\frac34, \num{0.7})$ & \empi \\
+Stabilisation & \qty{0.8}{\second} & \qty{1.0}{\second} (\code{CAL_HEAD_SETTLE_S}) & \empi \\
+Collecte & \qty{2.0}{\second} & \qty{4.5}{\second} (\code{CAL_HEAD_COLLECT_S}) & \empi \\
+Minimum d'échantillons & 15 & 30 (\code{CAL_HEAD_MIN_SAMPLES}) & \empi \\
+Poids d'une cible & 1 & 3 (\code{HEAD_GROUP_WEIGHT}) & \empi \\
+Consigne & \enquote{Fixe le point, tête immobile} & \enquote{Garde les yeux sur le point et bouge doucement la tête} & -- \\
+\bottomrule
+\end{tabularx}
+\caption{Protocole de calibration v2.}
+\label{tab:cal3d}
+\end{table}
+
+Durée totale sans reprise : $16 \times 2.8 + 3 \times 5.5 = \qty{61.3}{\second}$. Il n'y a pas de temps de lecture initial : la consigne est affichée en permanence sous le titre (\code{calibration_hint}, affichée par \code{afficher_consigne} dans \fichier{main_v2.py}). Comme en v1, une cible qui n'a pas réuni assez d'échantillons est reprise jusqu'à deux fois, puis ignorée.
+
+\paragraph{Les cibles de la phase tête en mouvement.} Le centre, puis deux points en diagonale opposée, à mi-chemin des bords : on teste la compensation de la tête dans trois directions de regard différentes, sans viser les bords, où l'iris est le plus mal mesuré. La collecte dure plus longtemps (\qty{4.5}{\second}) pour laisser le temps de faire un mouvement complet (gauche-droite, haut-bas, avant-arrière, selon la consigne affichée dans la console).
+
+\paragraph{Pourquoi cette phase est indispensable.} Tête immobile, la distance $Z_0$ est fixe et l'angle $\theta$ varie seulement avec la cible. Le point de l'écran vaut alors, en horizontal, environ $x \approx p_0\,Z_0\tan\!\big((1 + p_7)\,\theta\big) + \dots$ : le \emph{gain} de l'œil $p_7$, l'échelle de l'affine $p_0$ et la correction de distance $k_f$ (qui modifie $Z_0$) ont des effets presque interchangeables. Les données ne permettent pas de les séparer. Quand la tête bouge en gardant les yeux sur une cible fixe, $\theta$ varie alors que la cible ne bouge pas : seule la bonne combinaison de gain et de distance fait que le rayon continue à frapper le même point. Ces échantillons \emph{lèvent l'ambiguïté} ; ils reçoivent un poids triple parce qu'ils ne concernent que 3 cibles sur 19.
+
+\subsection{Données brutes}
+
+Pendant la calibration, aucun modèle de tête n'existe encore : on ne peut pas calculer $(\theta, \varphi)$. La v2 stocke donc les \emph{landmarks bruts} de chaque échantillon, avec $b_v$, la cible, l'indice de cible et le type (\code{fix} ou \code{head}). Tout est recalculé à la fin avec le modèle de tête construit sur l'ensemble des images.
+
+\subsection{Ajustement}
+
+\begin{algorithm}[H]
+\caption{\code{Calibration3D.fit(cam)}}
+\lIf{moins de 10 cibles fixes validées}{\Return échec}
+construire le \code{HeadModel} sur toutes les images (section~\ref{sec:headmodel})\;
+\ForEach{échantillon}{calculer \code{observe} ; ignorer s'il échoue}
+\ForEach(\tcp*[f]{rejet des aberrants}){cible fixe $g$}{
+  $\hat\sigma_c \leftarrow \max(\num{1.4826}\MAD(\text{ang}_c), \num{0.003})$ pour $c \in \{\theta, \varphi\}$\;
+  rejeter les échantillons avec $|\text{ang}_c - \med(\text{ang}_c)| > 3.5\,\hat\sigma_c$\;
+}
+$\omega_i \leftarrow H_{g_i}/n_{g_i}$ avec $H_g = 3$ (tête en mouvement) ou 1 (fixe) ; \ $\omega \leftarrow \omega/\bar\omega$\;
+ajuster \code{GeoGazeModel} (60 itérations au plus)\;
+erreurs d'entraînement (cibles fixes) et tête en mouvement : moyenne de $|\hat{\vect{y}} - \vect{y}|$\;
+\ForEach(\tcp*[f]{LOPO approchée}){cible fixe $g$}{
+  $\omega^{(g)} \leftarrow \omega$ avec $\omega^{(g)}_i = 0$ pour $i \in g$\;
+  réajuster en 3 itérations à partir des paramètres complets ; erreur sur $g$\;
+}
+\Return modèle de tête, modèle de regard, erreurs\;
+\end{algorithm}
+
+\paragraph{Rejet sur les angles, et seulement pour les cibles fixes.} Pour une cible fixe et une tête immobile, les angles œil/tête sont presque constants : un échantillon qui s'en écarte est une saccade ou un clignement partiel. Le plancher \qty{0.003}{\radian} (\ang{\approx 0.17}, \empi) évite de rejeter des échantillons sains quand la dispersion est très faible ; \num{3.5} est le seuil d'Iglewicz et Hoaglin \cite{iglewicz1993}. Pour les cibles \enquote{tête en mouvement}, les angles varient au contraire volontairement, puisque l'œil contre-tourne pour compenser la tête : le même test rejetterait les échantillons les plus utiles.
+
+\paragraph{Poids.} Chaque cible fixe pèse au total 1 et chaque cible tête en mouvement pèse 3, quel que soit son nombre d'images. La normalisation à une moyenne de 1 garde le terme de données à la même échelle que dans l'analyse des a priori ci-dessus.
+
+\paragraph{Validation croisée approchée.} Réajuster complètement 16 fois coûterait 16 fois l'ajustement principal. Le code part des paramètres complets et ne fait que 3 itérations sans la cible testée : c'est une approximation de la vraie erreur LOPO, légèrement optimiste, mais beaucoup moins chère.
+
+\subsection{Résultat}
+
+En cas de succès, \code{_finish_calibration} installe le modèle de tête et le modèle de regard, garde une copie du modèle comme \emph{modèle de base} pour la recalibration (chapitre~\ref{chap:recal}), remet à zéro le décalage de recentrage, l'historique et les filtres, et affiche :
+\begin{itemize}
+  \item l'erreur validée (LOPO) et l'erreur d'entraînement en $x$ et $y$, en \% de la fenêtre ;
+  \item l'erreur sur la phase tête en mouvement ;
+  \item le nombre de cibles ignorées et la durée de l'ajustement ;
+  \item les paramètres physiques appris : gains de l'œil ($1 + p_7$, $1 + p_{15}$), facteur de focale ($e^{k_f}$) et inclinaison de l'écran ($\tau_1$ en degrés).
+\end{itemize}
+Ces valeurs servent de diagnostic. Un gain très loin de 1 ou une inclinaison de \ang{40} signalent une calibration douteuse, ou une installation inhabituelle.

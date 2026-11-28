@@ -1,0 +1,121 @@
+\chapter{Récapitulatif des constantes}
+\label{chap:constantes}
+
+Origines : \litt{} (publication ou physiologie), \deriv{} (conséquence mathématique), \conv{} (convention ou valeur imposée par une bibliothèque), \empi{} (choix de conception réglé à l'usage, non mesuré). La dernière colonne renvoie au chapitre où la valeur est discutée.
+
+\small
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{4.6cm} >{\raggedright\arraybackslash}p{2.6cm} >{\raggedright\arraybackslash}p{2.3cm} >{\raggedright\arraybackslash}p{4.4cm} c@{}}
+\toprule
+Constante & Valeur & Origine & Rôle & Ch. \\
+\midrule
+\endfirsthead
+\toprule
+Constante & Valeur & Origine & Rôle & Ch. \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\multicolumn{5}{@{}l}{\textbf{Caméra et MediaPipe} (\fichier{utils.py}, \fichier{utils_v2.py})}\\
+\code{CAM_WIDTH}, \code{CAM_HEIGHT} & $640\times480$ & \empi & compromis coût / précision sur Pi & \ref{chap:archi} \\
+\code{CAM_FPS} & 30 & \conv & cadence standard des webcams & \ref{chap:archi} \\
+\code{CAP_PROP_BUFFERSIZE} & 1 & \deriv & latence minimale : toujours l'image la plus récente & \ref{chap:archi} \\
+confiances MediaPipe & \num{0.5} & \conv & valeurs par défaut de la bibliothèque & \ref{chap:mediapipe} \\
+\code{num_faces} & 1 & \conv & un utilisateur ; lissage interne actif & \ref{chap:mediapipe} \\
+indices \code{EYE_A}, \code{EYE_B}, \code{NOSE_TIP} & voir tableau & \conv & maillage canonique MediaPipe & \ref{chap:mediapipe} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Calibration commune}}\\
+\code{CAL_COLS}, \code{CAL_ROWS} & $4\times4$ & \empi & 16 cibles & \ref{chap:v1} \\
+\code{CAL_MARGIN} & \num{0.05} & \empi & cibles à \qty{5}{\percent} des bords & \ref{chap:v1} \\
+\code{CAL_LEAD_S} (v1) & \qty{2.5}{\second} & \empi & lecture de la consigne & \ref{chap:v1} \\
+\code{CAL_SETTLE_S} & \qty{0.8}{\second} & \empi{} / \litt & saccade et stabilisation & \ref{chap:v1} \\
+\code{CAL_COLLECT_S} & \qty{2.0}{\second} & \empi & $\approx 60$ images par cible & \ref{chap:v1} \\
+\code{CAL_MIN_SAMPLES} & 15 & \empi & \qty{25}{\percent} des images & \ref{chap:v1} \\
+\code{CAL_MIN_POINTS} & 10 & \empi & couverture spatiale minimale & \ref{chap:v1} \\
+reprises par cible & 2 & \empi & puis cible ignorée & \ref{chap:v1} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Tracker v1} (\fichier{utils.py})}\\
+\code{RIDGE_LAMBDAS} & \num{0.002} \dots{} 1 & \empi & grille log, pas $\approx\times5$ & \ref{chap:v1} \\
+\code{SD_FLOORS} & 13 valeurs & \empi & $\approx$ bruit de chaque feature & \ref{chap:v1} \\
+\code{PENALTY} & 1 ; 4 (quadr.) & \empi & courbures plus pénalisées & \ref{chap:v1} \\
+\code{HEAD_CLIP_Z} & 3 & \deriv & $\pm3\sigma$ : \qty{99.7}{\percent} d'une gaussienne & \ref{chap:v1} \\
+\code{MAX_YAW_DEG}, \code{MAX_PITCH_DEG} & \ang{40}, \ang{35} & \empi & iris non fiable au-delà & \ref{chap:v1} \\
+\code{CAL_HEAD_MIN_SD} & \ang{0.8} & \empi & alerte tête immobile & \ref{chap:v1} \\
+seuil d'alerte LOPO & \qty{12}{\percent} & \empi & $\approx$ un tiers de case & \ref{chap:v1} \\
+rejet par cible & 5 MAD, plancher \num{0.01} & \empi & aberrants francs seulement & \ref{chap:v1} \\
+rejet sur résidus & \num{3.5} MAD, \qty{70}{\percent} & \litt{} / \empi & z-score modifié & \ref{chap:v1} \\
+LOPO : entraînement minimal & 20 échantillons & \empi & & \ref{chap:v1} \\
+\code{FALLBACK_GAIN_X}, \code{_Y} & 3, 6 & \empi & curseur approximatif & \ref{chap:v1} \\
+repli clignement $a_p$ & \num{0.08} & \empi & œil presque fermé & \ref{chap:v1} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Statistiques robustes}}\\
+constante de cohérence & \num{1.4826} & \deriv & $1/\Phi^{-1}(3/4)$ & \ref{chap:v1} \\
+seuil d'aberrance & \num{3.5} & \litt & Iglewicz et Hoaglin & \ref{chap:v1} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Géométrie v2} (\fichier{utils_v2.py})}\\
+\code{CAM_HFOV_DEG} & \ang{60} & \litt{} / \empi & webcam typique ; $f \approx \qty{554}{px}$ & \ref{chap:v2geo} \\
+\code{IPD_CM} & \qty{6.3}{\centi\metre} & \litt & IPD adulte moyenne & \ref{chap:v2geo} \\
+\code{EYE_RADIUS_CM} & \qty{1.15}{\centi\metre} & \litt{} / \empi & centre de rotation $\to$ pupille & \ref{chap:v2geo} \\
+\code{EYE_DEPTH_CM} & \qty{1.0}{\centi\metre} & \litt{} / \empi & centre derrière les coins & \ref{chap:v2geo} \\
+\code{MAX_HEAD_ANGLE_DEG} & \ang{50} & \empi & un œil masqué au-delà & \ref{chap:v2geo} \\
+\code{RIGID_IDX} & 69 points & \empi & régions osseuses & \ref{chap:v2geo} \\
+\code{MODEL_MAX_FRAMES} & 150 & \empi & coût du modèle de tête & \ref{chap:v2geo} \\
+itérations Procrustes & 4 & \empi & convergence en 2--3 & \ref{chap:v2geo} \\
+IRLS pose & 2 passes, $c = \num{2.5}\hat\sigma$ & \litt{} / \empi & poids de Cauchy ($\num{2.385}$ classique) & \ref{chap:v2geo} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Modèle de regard v2}}\\
+\code{N_PARAMS} & 23 & \deriv & 6 + 7 + 7 + 2 + 1 & \ref{chap:v2mod} \\
+\code{FIT_SIGMA} & \num{0.03} & \empi & bruit par échantillon & \ref{chap:v2mod} \\
+\code{PRIOR_SIGMA} & voir tableau & \empi & a priori faibles & \ref{chap:v2mod} \\
+borne du dénominateur & $-\num{0.01}$ & \empi & regard parallèle à l'écran & \ref{chap:v2mod} \\
+LM : $\mu_0$, $\times4$, $/3$ & $10^{-3}$, 4, 3 & \empi & amortissement & \ref{chap:v2mod} \\
+LM : $\mu_\text{max}$, $\mu_\text{min}$ & $10^{10}$, $10^{-9}$ & \empi & bornes & \ref{chap:v2mod} \\
+LM : pas de dérivation & $10^{-6}\max(1,|p|)$ & \deriv & $\approx$ racine de la précision machine & \ref{chap:v2mod} \\
+LM : tolérance, itérations & $10^{-8}$ ; 60 / 15 / 3 & \empi & calibration / recal / LOPO & \ref{chap:v2mod} \\
+\code{CAL_HEAD_TARGETS} & 3 cibles & \empi & centre et diagonale & \ref{chap:v2mod} \\
+\code{CAL_HEAD_SETTLE_S}, \code{_COLLECT_S} & \qty{1.0}{\second}, \qty{4.5}{\second} & \empi & mouvement complet de la tête & \ref{chap:v2mod} \\
+\code{CAL_HEAD_MIN_SAMPLES} & 30 & \empi & & \ref{chap:v2mod} \\
+\code{HEAD_GROUP_WEIGHT} & 3 & \empi & 3 cibles face à 16 & \ref{chap:v2mod} \\
+rejet angles (cibles fixes) & \num{3.5} MAD, plancher \qty{0.003}{\radian} & \litt{} / \empi & saccades, clignements & \ref{chap:v2mod} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Recalibration}}\\
+\code{RECAL_PARAMS} & [6, 13, 7, 15] & \deriv & décalages et gains $\theta$, $\varphi$ & \ref{chap:recal} \\
+\code{RECAL_SIGMA} & [0,15 ; 0,15 ; 0,2 ; 0,2] & \empi & ancre sur la calibration & \ref{chap:recal} \\
+\code{RECAL_WEIGHT} & 1 & \empi & poids du dernier clic & \ref{chap:recal} \\
+\code{RECAL_DECAY} & \num{0.8} (YAML \num{0.85}) & \empi & 5 (6,7) clics effectifs & \ref{chap:recal} \\
+\code{RECAL_MAX_POINTS} & 20 & \deriv{} / \empi & poids au-delà $< \qty{5}{\percent}$ & \ref{chap:recal} \\
+\code{RECAL_WINDOW_S} & \qty{0.5}{\second} (YAML \num{0.4}) & \empi & cœur de la fixation & \ref{chap:recal} \\
+images minimales par point & 3 & \empi & & \ref{chap:recal} \\
+historique \code{_recent} & 300 & \empi & $\approx\qty{10}{\second}$ & \ref{chap:recal} \\
+part du centre $\alpha$ & \num{0.5} (YAML \num{0.65}) & \empi & estimateur à rétrécissement & \ref{chap:recal} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Traitement du signal}}\\
+\code{BLINK_THRESHOLD} & \num{0.6} & \empi & seuil sur \code{eyeBlink} & \ref{chap:traitements} \\
+\code{BLINK_HOLD_S} & \qty{0.15}{\second} & \litt{} / \empi & réouverture de la paupière & \ref{chap:traitements} \\
+\code{ONE_EURO_MIN_CUTOFF} & \qty{0.6}{\hertz} & \empi & stabilité au repos & \ref{chap:traitements} \\
+\code{ONE_EURO_BETA} & 3 & \empi & réactivité & \ref{chap:traitements} \\
+\code{ONE_EURO_D_CUTOFF} & \qty{1}{\hertz} & \litt & recommandation des auteurs & \ref{chap:traitements} \\
+historique de recentrage & 20 prédictions & \empi & bruit $/\sqrt{20}$ & \ref{chap:traitements} \\
+\code{delai_perte_regard} & \qty{0.5}{\second} & \deriv{} / \empi & $>$ clignement + maintien & \ref{chap:traitements} \\
+moyenne de cadence & $0.9 / 0.1$ & \empi & $\approx 10$ images & \ref{chap:archi} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Interaction et rendu}}\\
+\code{duree_clic} & \qty{2}{\second} & \empi{} / \litt & toucher de Midas & \ref{chap:interaction} \\
+lissage du curseur $\tau_c$ & \qty{50}{\milli\second} & \empi & $\approx$ période caméra & \ref{chap:interaction} \\
+marge, en-tête & \num{0.012}, \num{0.06} & \empi & proportions de l'écran & \ref{chap:interaction} \\
+exposant super-ellipse & $2 + 8a$ & \empi & 2 (ellipse) à 10 (plat) & \ref{chap:interaction} \\
+\code{DUREE_GLISSEMENT} & \qty{0.22}{\second} & \empi & animation de page & \ref{chap:rendu} \\
+\code{DUREE_POP} & \qty{0.35}{\second} & \empi & confirmation du clic & \ref{chap:rendu} \\
+bulle : apparition, disparition & \qty{0.12}{\second}, \qty{0.3}{\second} & \empi & & \ref{chap:rendu} \\
+mélanges de couleur & \qty{30}{\percent}, \qty{18}{\percent} & \empi & bouton coloré, survol & \ref{chap:rendu} \\
+réduction du texte & $\times\num{0.85}$, 6 essais & \empi & ajustement à la carte & \ref{chap:rendu} \\
+limites des caches & 400, 24, 48 & \empi & mémoire bornée & \ref{chap:rendu} \\
+segments de l'anneau & $\max(2, 64p)$ & \empi & arc lisse & \ref{chap:rendu} \\
+\midrule
+\multicolumn{5}{@{}l}{\textbf{Actions}}\\
+\code{BROCHES_MAX} & 27 & \conv & GPIO 0--27 du connecteur 40 broches & \ref{chap:actions} \\
+\code{HTTP_DELAI_S} & \qty{3}{\second} & \empi & appareil local & \ref{chap:actions} \\
+\code{HTTP_TAILLE_MAX} & \qty{64}{\kilo\byte} & \empi & lecture d'une valeur & \ref{chap:actions} \\
+troncature \code{http_lire} & 60 caractères & \empi & une ligne à l'écran & \ref{chap:actions} \\
+\code{attendre} & 0--\qty{60}{\second} & \empi & & \ref{chap:actions} \\
+\end{longtable}
+\normalsize

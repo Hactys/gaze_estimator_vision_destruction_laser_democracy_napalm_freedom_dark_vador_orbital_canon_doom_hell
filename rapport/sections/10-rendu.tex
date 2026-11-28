@@ -1,0 +1,115 @@
+\chapter{Rendu graphique}
+\label{chap:rendu}
+
+\fichier{interface.py} dessine l'interface avec pygame (SDL). Le module est \enquote{pensé pour un Raspberry Pi} : sur cette cible, SDL dessine en général en logiciel, et recopier un écran entier à chaque image coûte cher. Tout le module est organisé pour \emph{ne redessiner et ne transmettre que ce qui change}.
+
+\section{Thèmes et dimensions}
+
+Deux thèmes, \code{sombre} et \code{clair}, définissent 10 couleurs : fond, carte, carte de retour, contour, case vide, zone morte, texte, texte doux, piste de l'anneau et alerte. La couleur d'accent (\code{couleur_accent}) sert pour les anneaux, les contours de survol, le halo du curseur et l'indicateur de page.
+
+\code{Rendu.construire(ecran)} recalcule toutes les tailles en proportion de la fenêtre (\empi, choisies pour rester lisibles à distance) :
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Élément & Taille \\
+\midrule
+rayon des coins & $\max(6, \operatorname{round}(\num{0.022}\min(w,h)))$ \\
+rayon de l'anneau de progression & $\max(16, \operatorname{round}(\num{0.032}\,h))$ \\
+épaisseur de l'anneau & $\max(3, \operatorname{round}(\num{0.006}\,h))$ \\
+texte des cartes (taille de départ) & $\num{0.055}\,h \times \code{taille_texte}/100$ \\
+petit texte (en-tête, bulles) & $\max(12, \operatorname{round}(\num{0.42}\,e))$ \\
+rayon du curseur & $\max(5, \operatorname{round}(\num{0.009}\,h))$, halo $2r + 4$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Stratégie de rendu incrémental}
+
+\subsection{Caches}
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l l L@{}}
+\toprule
+Cache & Clé & Limite & Contenu \\
+\midrule
+\code{_polices} & taille & -- & objets \code{Font} \\
+\code{_textes} & (texte, taille, couleur) & 400 & surfaces de texte rendues (anti-aliasing compris) \\
+\code{_icones} & (chemin, taille) & -- & icônes chargées et redimensionnées (\code{smoothscale}) \\
+\code{_pages} & (menu, page) & 24 & page complète : fond et toutes les cartes au repos \\
+\code{_survols} & ((menu, page), case) & 48 & une carte dans son état survolé \\
+\bottomrule
+\end{tabularx}
+\caption{Caches du rendu. Au-delà de la limite, le cache est vidé entièrement : c'est plus simple qu'une politique LRU, et suffisant puisque les menus se reconstituent en quelques millisecondes.}
+\end{table}
+
+Rendre un texte anti-aliasé ou redimensionner une image est coûteux. Avec ces caches, une page n'est dessinée qu'une fois ; ensuite, l'afficher se réduit à une copie de surface (\code{blit}).
+
+\subsection{Fond statique}
+
+\code{self.fond} est une surface de la taille de l'écran qui contient tout ce qui ne bouge pas : la page courante, l'en-tête (fil d'Ariane, points de pagination, statut), les bandes dans leur état normal ou inactif, et la zone morte. Elle n'est reconstruite que si la clé (menu, page, nombre de pages, fil, statut) change.
+
+\subsection{Rectangles sales}
+
+\begin{algorithm}[H]
+\caption{Une image de \code{Rendu.dessiner} (hors animation)}
+\eIf{tout doit être redessiné (nouveau fond, fin d'animation, calibration)}{copier tout le fond à l'écran}{
+  \ForEach{rectangle $r$ modifié à l'image précédente (\code{sales})}{copier $\text{fond}[r]$ à l'écran \tcp*{effacement}}
+}
+dessiner les éléments mobiles et collecter leurs rectangles : carte ou bande survolée, vignette caméra, bulle, anneau, pop, curseur\;
+\eIf{tout}{\code{display.flip()}}{\code{display.update(sales} $\cup$ \code{rects)}}
+\code{sales} $\leftarrow$ \code{rects}\;
+\end{algorithm}
+
+À chaque image, on transmet à l'écran les rectangles de l'image précédente, qu'il faut effacer, et ceux de l'image actuelle. Le curseur et l'anneau occupent quelques milliers de pixels, contre deux millions pour un écran 1080p ; le gain est de plusieurs ordres de grandeur sur la bande passante vers l'écran.
+
+\paragraph{Superposition carte survolée / zone morte.} La carte survolée est redessinée par-dessus le fond. Si elle chevauche la zone morte, celle-ci est redessinée par-dessus, avec un découpage (\code{set_clip}) limité au rectangle de la carte, pour qu'elle reste visible au premier plan.
+
+\section{Éléments animés}
+
+\subsection{Anneau de progression}
+
+L'arc de progression $p \in [0,1]$ est un polygone fermé : $n + 1$ points sur le cercle extérieur de rayon $R$, de l'angle $-\pi/2$ (en haut) à $-\pi/2 + 2\pi p$, puis les mêmes angles parcourus à l'envers sur le cercle intérieur de rayon $R - e_p$, avec $n = \max(2, \lfloor 64\,p\rfloor)$. Le nombre de segments croît avec l'arc : 64 pour un tour complet, assez pour paraître lisse. Le polygone est rempli puis bordé en anti-aliasé (\code{gfxdraw}), au-dessus d'une piste circulaire grise.
+
+\subsection{Courbe d'animation}
+
+Les animations utilisent la courbe \enquote{ease-out cubique}
+\begin{equation}
+  E(t) = 1 - (1 - t)^3, \qquad t \in [0, 1],
+\end{equation}
+qui part vite ($E'(0) = 3$) et ralentit jusqu'à l'arrêt ($E'(1) = 0$) : le mouvement paraît naturel et se termine en douceur.
+
+\begin{itemize}
+  \item \textbf{Glissement de page} (\qty{0.22}{\second}, \code{DUREE_GLISSEMENT}) : avec $W$ la largeur de la zone centrale et $s = \pm1$ le sens, le décalage vaut $\delta = \operatorname{round}(E(t)\,W)\,s$. L'ancienne page est dessinée en $-\delta$ et la nouvelle en $sW - \delta$, avec un découpage à la zone centrale, de sorte que les bandes et l'en-tête restent immobiles. Désactivable par \code{animations: non}.
+  \item \textbf{Pop de clic} (\qty{0.35}{\second}, \code{DUREE_POP}) : un cercle de rayon $R\,(1 + 0.9\,E(t))$ et d'opacité $255\,(1 - t)$, centré sur le point du clic. C'est la confirmation visuelle qu'un clic a eu lieu.
+  \item \textbf{Bulle de message} (durée $T = \code{duree_message}$) : opacité $255 \cdot \min\big(1,\ (T - \text{âge})/0.3,\ \text{âge}/0.12\big)$, soit une apparition en \qty{0.12}{\second} et une disparition sur les \qty{0.3}{\second} finales.
+\end{itemize}
+Ces durées (\empi) sont de l'ordre des durées d'animation habituelles dans les interfaces (\qtyrange{150}{400}{\milli\second}) : assez longues pour être perçues, assez courtes pour ne pas ralentir l'utilisateur.
+
+\section{Cartes}
+
+\begin{itemize}
+  \item \textbf{Couleurs.} Le fond d'une carte colorée est $\text{mix}(\text{carte}, \text{couleur}, 0.3)$, avec $\text{mix}(c_1, c_2, t) = c_1 + t(c_2 - c_1)$. Au survol, on mélange encore \qty{18}{\percent} de la couleur vive (celle du bouton, ou l'accent), et un contour épais apparaît. Le bouton Retour a un fond plus sombre et un texte plus doux, pour qu'on ne le confonde pas avec une action.
+  \item \textbf{Mise en page du texte.} \code{_couper} coupe le texte au mot près en respectant les \texttt{\textbackslash n}. La taille part de la taille nominale et est réduite de \qty{15}{\percent} à chaque essai, jusqu'à 6 essais, tant que l'ensemble (icône, écart, lignes) dépasse \qty{86}{\percent} de la hauteur visible ou qu'une ligne dépasse la largeur utile. Le contenu est centré verticalement dans la portion visible de la carte (section~\ref{sec:disposition}).
+  \item \textbf{Icône.} Elle occupe au plus $\min(\num{0.55}\,h_\text{visible}, \num{0.6}\,\text{largeur})$ ; elle est omise si elle ferait moins de 8 pixels.
+\end{itemize}
+
+\begin{attention}
+Si aucun des 6 essais ne tient, la boucle sort après une dernière réduction de la taille, mais les lignes et la hauteur totale gardent les valeurs de l'essai précédent. Le texte est alors rendu un peu plus petit que la mise en page calculée. L'effet est sans gravité (le texte reste centré et tient dans la carte), mais c'est une légère incohérence.
+\end{attention}
+
+\section{Vignette caméra}
+
+En mode debug (touche D), l'image annotée par le tracker (contours de l'iris, coins des yeux, cadence, clignement, pose, angles) est affichée en bas à gauche, avec une largeur de $\max(160, w/5)$ pixels. La conversion (redimensionnement \code{INTER_AREA}, BGR $\to$ RGB, surface pygame) n'est refaite que si \code{frame_id} a changé : l'interface tourne à 30 images par seconde comme la caméra, mais ne convertit jamais deux fois la même image.
+
+\section{Écran de calibration}
+
+\code{dessiner_calibration} redessine tout l'écran à chaque image, car il n'y a presque rien à afficher :
+\begin{itemize}
+  \item un cercle-guide de rayon $R_c = R + 8$ autour de la cible ;
+  \item un disque plein de rayon $\max(4, \operatorname{round}(0.85\,R_c\,(1 - \text{frac})))$, qui \emph{rétrécit} à mesure que le temps passe sur la cible. Il est gris pendant la stabilisation et prend la couleur d'accent pendant la collecte : l'utilisateur voit quand ses données comptent ;
+  \item un point central de 3 pixels, pour un point de fixation précis ;
+  \item en haut, \enquote{Calibration $i/N$ -- fixe le point (Échap = annuler)}.
+\end{itemize}
+Un disque qui rétrécit attire le regard vers son centre, ce qui améliore la précision de la fixation. La v1 fournit une consigne sur deux lignes, affichée au centre de l'écran : aucune cible n'y est jamais placée, puisque les cibles sont aux positions $\{0.05, 0.35, 0.65, 0.95\}$. La v2 affiche sa consigne sous le titre.

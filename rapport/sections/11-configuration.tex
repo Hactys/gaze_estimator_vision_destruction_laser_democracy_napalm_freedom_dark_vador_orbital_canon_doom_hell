@@ -1,0 +1,119 @@
+\chapter{Configuration}
+\label{chap:config}
+
+La configuration (\fichier{config.py}) est pensée pour être écrite par un aidant qui n'est pas programmeur. D'où trois principes :
+\begin{itemize}
+  \item tous les réglages sont optionnels ;
+  \item les erreurs sont détectées \emph{au chargement}, toutes à la fois, plutôt qu'au premier clic ;
+  \item chaque message en français désigne l'endroit exact du problème et propose une correction.
+\end{itemize}
+
+\section{Formats}
+
+Le format se déduit de l'extension : \fichier{.yaml}/\fichier{.yml} (PyYAML, \code{safe_load}, qui ne construit pas d'objets Python arbitraires), \fichier{.toml} (\code{tomllib}, bibliothèque standard depuis Python 3.11) ou \fichier{.json}. La structure est la même dans les trois formats ; \fichier{victor/exemples/} contient la configuration par défaut en TOML et en JSON.
+
+\begin{itemize}
+  \item Le fichier est lu en UTF-8 avec \code{utf-8-sig}, qui ignore la marque d'ordre des octets (BOM) qu'ajoutent certains éditeurs sous Windows.
+  \item Une erreur de syntaxe donne la ligne et la colonne (YAML, JSON), ou le message du lecteur TOML, ainsi qu'un conseil propre au format : indentation par espaces en YAML, guillemets en TOML, virgule finale interdite en JSON.
+  \item Si le fichier n'existe pas, toutes les valeurs par défaut s'appliquent et un message le signale.
+\end{itemize}
+
+\section{Fusion avec les valeurs par défaut}
+
+\code{_fusionner(defaut, donne, chemin, erreurs)} parcourt récursivement le dictionnaire \code{DEFAUTS}. \emph{Le type de la valeur par défaut détermine la validation} :
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l L@{}}
+\toprule
+Type par défaut & Règle \\
+\midrule
+dictionnaire & fusion récursive ; une valeur non dictionnaire est une erreur \\
+booléen & \code{oui}/\code{vrai}/\code{o}/\code{true} ou \code{non}/\code{faux}/\code{n}/\code{false}, sans distinction de casse \\
+nombre & doit être un nombre (un booléen n'est pas accepté), dans les bornes \code{BORNES} si elles existent \\
+liste & même longueur que la valeur par défaut, uniquement des nombres \\
+texte & converti en chaîne ; s'il figure dans \code{CHOIX}, doit être une valeur autorisée \\
+\bottomrule
+\end{tabularx}
+\caption{Règles de validation de \code{_fusionner}.}
+\end{table}
+
+Une clé inconnue produit une erreur avec la clé connue la plus proche (\code{difflib.get_close_matches}, fondé sur la similarité de Ratcliff-Obershelp), par exemple \enquote{\code{reglages.duree_clik} : réglage inconnu, voulais-tu dire \code{"duree_clic"} ?}. Une valeur invalide est remplacée par sa valeur par défaut \emph{et} signalée : la vérification continue, ce qui permet d'afficher toutes les erreurs en un seul passage.
+
+\paragraph{Exclusion des booléens.} En Python, \code{True} est un \code{int}. Sans le test \code{isinstance(v, bool)}, \code{duree_clic: oui} serait accepté comme la valeur 1.
+
+\section{Conversions spécifiques}
+
+\begin{itemize}
+  \item \code{grille} : l'expression régulière \verb|(\d+)\s*[xX]\s*(\d+)| (ainsi que le signe $\times$) accepte \enquote{2x3}, \enquote{2 X 3} ou \enquote{2×3}. Lignes et colonnes doivent être entre 1 et 4 : au-delà, les cases deviennent trop petites pour la précision d'un eye tracker webcam (\empi).
+  \item \code{couleur_accent} et couleurs de boutons : un nom parmi 10 (rouge, vert, bleu, orange, jaune, violet, rose, gris, turquoise, marron) ou \texttt{\#RRGGBB}. Les valeurs hexadécimales des noms correspondent à une palette d'interface aux teintes vives, lisibles sur fond sombre comme sur fond clair (\conv).
+\end{itemize}
+
+\section{Menus et boutons}
+
+\code{_lire_menus} construit un dictionnaire \code{nom -> liste de Bouton} :
+\begin{enumerate}
+  \item Le menu \code{principal} est obligatoire dès qu'il y a des menus ; s'il n'y a aucun menu, un menu principal vide est créé.
+  \item Chaque sous-menu reçoit \emph{en première position} un bouton Retour (\code{texte_retour}, action \code{retour}, \code{est_retour=True}). Il apparaît donc toujours dans la première case de la première page, à la même place dans tous les sous-menus.
+  \item Clés d'un bouton : \code{texte}, \code{action}, \code{icone}, \code{duree_clic}, \code{couleur}. Toute autre clé est une erreur, avec suggestion.
+  \item \code{action} est une chaîne ou une liste de chaînes. Chacune est analysée par \code{actions.analyser}, qui reçoit la liste de \emph{tous} les noms de menus : un \code{ouvrir} vers un menu défini plus bas dans le fichier est accepté, une faute de frappe est détectée.
+  \item \code{icone} est un chemin relatif au fichier de configuration ; l'existence du fichier est vérifiée.
+  \item \code{duree_clic} doit être entre \qtyrange{0.2}{30}{\second}.
+  \item Il faut au moins un texte ou une icône.
+\end{enumerate}
+Les messages localisent l'erreur, par exemple \enquote{\texttt{menus.Raccourcis, bouton 2 «~Navigateur~» : ...}}.
+
+\paragraph{Le type \code{Bouton}.} C'est une \code{dataclass} avec \code{texte}, \code{etapes} (liste de \code{(nom, [arguments])}), \code{icone} (chemin absolu), \code{duree_clic}, \code{couleur} (RGB), \code{est_retour} et \code{navigue}. Ce dernier champ est calculé : vrai si la séquence contient \code{ouvrir}, \code{retour} ou \code{accueil}. Il sert à ne pas afficher de bulle pour une simple navigation.
+
+\section{Résultat}
+
+S'il y a au moins une erreur, \code{charger} lève une unique \code{ErreurConfig} qui les liste toutes. Sinon, elle renvoie un \code{SimpleNamespace} imbriqué (\code{cfg.ecran.zone_morte.largeur}, \code{cfg.avance.camera}…), dont l'attribut \code{menus} est le dictionnaire des boutons.
+
+\section{Tous les réglages}
+
+\begin{longtable}{@{}p{5.1cm} p{1.9cm} p{1.6cm} p{1.9cm} p{3.8cm}@{}}
+\toprule
+Clé & \fichier{config.py} & \fichier{config.yaml} & Bornes & Effet \\
+\midrule
+\endfirsthead
+\toprule
+Clé & \fichier{config.py} & \fichier{config.yaml} & Bornes & Effet \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\code{ecran.plein_ecran} & non & oui & & plein écran au démarrage \\
+\code{ecran.taille_fenetre} & [1280, 720] & & 2 nombres & taille hors plein écran \\
+\code{ecran.grille} & 2x2 & & 1--4 & lignes × colonnes \\
+\code{ecran.largeur_bandes} & 7 & 12 & 0--30 \% & largeur de chaque bande \\
+\code{ecran.zone_morte.largeur} & 22 & 30 & 0--80 \% & largeur totale \\
+\code{ecran.zone_morte.hauteur} & 34 & 40 & 0--80 \% & hauteur totale \\
+\code{ecran.zone_morte.aplatissement_haut} & \num{0.5} & 0 & 0--1 & forme du haut \\
+\code{ecran.theme} & sombre & & sombre, clair & thème \\
+\code{ecran.couleur_accent} & \#4F8EF7 & & & accent \\
+\code{ecran.taille_texte} & 100 & & 30--300 \% & taille du texte \\
+\code{ecran.police} & (système) & & & fichier \fichier{.ttf} \\
+\code{ecran.animations} & oui & & & glissement de page \\
+\code{reglages.duree_clic} & \qty{2.0}{\second} & & 0,2--30 & durée de fixation \\
+\code{reglages.retour_apres_action} & non & & & retour à l'accueil \\
+\code{reglages.texte_retour} & $\leftarrow$ Retour & & & texte du bouton retour \\
+\code{reglages.duree_message} & \qty{1.5}{\second} & & 0--30 & durée des bulles \\
+\code{avance.camera} & 0 & & & index de la webcam \\
+\code{avance.resolution_camera} & [640, 480] & & 2 nombres & résolution demandée \\
+\code{avance.afficher_camera} & non & & & vignette de debug \\
+\code{avance.images_par_seconde} & 30 & & 5--120 & cadence de l'interface \\
+\code{avance.seuil_clignement} & \num{0.6} & & 0--1 & clignements \\
+\code{avance.filtre_stabilite} & \num{0.6} & & 0,01--10 & $f_{\min}$ One Euro (Hz) \\
+\code{avance.filtre_reactivite} & \num{3.0} & & 0--100 & $\beta$ One Euro \\
+\code{avance.delai_perte_regard} & \qty{0.5}{\second} & & 0--10 & regard perdu \\
+\code{avance.recalibration_clic} & oui & & & recalibration au clic \\
+\code{avance.recalibration_part_centre} & \num{0.5} & \num{0.65} & 0--1 & $\alpha$ \\
+\code{avance.recalibration_poids} & \num{1.0} & & 0--20 & $W$ \\
+\code{avance.recalibration_oubli} & \num{0.8} & \num{0.85} & 0--1 & $d$ \\
+\code{avance.recalibration_points_max} & 20 & & 1--200 & fenêtre glissante \\
+\code{avance.recalibration_fenetre} & \qty{0.5}{\second} & \qty{0.4}{\second} & 0,05--5 & $\Delta$ \\
+\end{longtable}
+
+\begin{attention}
+L'en-tête de \fichier{config.yaml} affirme que \enquote{les valeurs écrites ici SONT les valeurs par défaut}. C'est faux pour huit réglages, ceux dont la colonne \fichier{config.yaml} est remplie ci-dessus. Supprimer l'une de ces lignes du YAML ne rétablit donc pas la valeur qui y était écrite. Il faudrait aligner \code{DEFAUTS} sur le YAML, ou corriger le commentaire. De même, les constantes du module \fichier{utils_v2.py} (\code{RECAL_DECAY = 0.8}, \code{RECAL_WINDOW_S = 0.5}) ne correspondent qu'aux défauts de \fichier{config.py}.
+\end{attention}

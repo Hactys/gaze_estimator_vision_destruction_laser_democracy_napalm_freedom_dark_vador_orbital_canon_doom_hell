@@ -1,0 +1,88 @@
+\chapter{Introduction}
+\label{chap:intro}
+
+\section{Objectif du projet}
+
+Le but est de permettre à une personne qui ne peut pas se servir de ses mains de commander un ordinateur, ou des appareils reliés à un Raspberry Pi, \emph{uniquement avec le regard}, en utilisant une webcam ordinaire et sans matériel spécialisé (pas de caméra infrarouge, pas d'éclairage actif, pas de mentonnière).
+
+Le principe d'interaction est celui de la \emph{sélection par fixation} (\emph{dwell selection}) :
+\begin{enumerate}
+  \item l'écran est découpé en quelques grands boutons (grille $2\times2$ ou $2\times3$) ;
+  \item un curseur suit le point regardé ;
+  \item lorsque le regard reste sur un bouton pendant \code{duree_clic} secondes (\qty{2}{\second} par défaut), un anneau de progression se remplit puis l'action du bouton se déclenche ;
+  \item au centre de l'écran, une \emph{zone morte} ovale permet de reposer les yeux sans rien déclencher.
+\end{enumerate}
+
+Les menus, les boutons et leurs actions sont décrits dans un fichier de configuration (YAML, TOML ou JSON) qu'un aidant peut modifier sans toucher au code.
+
+\section{Contraintes de conception}
+
+Le code porte la trace de plusieurs contraintes, qui expliquent la plupart des choix techniques décrits dans ce document.
+
+\begin{description}[style=nextline]
+  \item[Matériel bon marché.] Une webcam RGB standard (résolution demandée $640\times480$, \qty{30}{images\per\second}) et un Raspberry Pi 4 ou 5, ou un PC. L'estimation du regard doit donc se contenter de la position de l'iris dans l'image, mesurée à quelques pixels près.
+  \item[Calcul limité.] Sur Raspberry Pi, le réseau de neurones de détection du visage occupe déjà une bonne partie du processeur. Le reste du pipeline doit rester léger : calculs vectorisés, rendu graphique incrémental, mise en cache.
+  \item[Robustesse aux mouvements de tête.] L'utilisateur ne peut pas garder la tête parfaitement immobile pendant des heures. C'est la raison d'être du tracker v2 (chapitres~\ref{chap:v2geo} et~\ref{chap:v2mod}).
+  \item[Tolérance aux erreurs de pointage.] Même bien calibré, un eye tracker webcam a une erreur de plusieurs pour cent de la largeur de l'écran. L'interface utilise donc peu de boutons, de grande taille, et une zone morte.
+  \item[Sécurité de l'interaction.] Regarder n'est pas cliquer : c'est le problème du \enquote{toucher de Midas} \cite{jacob1991}. La durée de fixation, le blocage après un clic et la zone morte servent à éviter les déclenchements involontaires.
+  \item[Configuration par un non-programmeur.] Les messages d'erreur de configuration sont en français, localisés (chemin de la clé fautive) et accompagnés de suggestions.
+\end{description}
+
+\section{Historique du travail réalisé}
+
+Le tableau~\ref{tab:historique} résume l'évolution du dépôt d'après l'historique Git.
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l L@{}}
+\toprule
+Date & Commit & Contenu \\
+\midrule
+16/09/2026 & \code{4ca3b57} & Premier prototype \fichier{main.py} : sélection sur une grille $3\times3$ sans calibration, par seuillage de la position de l'iris dans l'orbite ; ajout du modèle MediaPipe. \\
+16/09/2026 & \code{7e17919}, \code{a961ffd} & Essais, ajout d'un gain et d'une sensibilité. \\
+25/11/2026 & \code{f2ba5a4} & Nouvelle calibration : \fichier{test_xav.py}, tracker \enquote{précision} (repère de l'œil, blendshapes, compensation de la tête, calibration 16 points, ridge, One Euro). \\
+26/11/2026 & \code{0cd7e8a} & Interface complète dans \fichier{victor/} : briques réutilisables (\fichier{utils.py}), rendu pygame, configuration YAML/TOML/JSON, actions, mode souris. \\
+26/11/2026 & \code{7b26ee3} & Réglage de la disposition de l'écran. \\
+26/11/2026 & \code{6d68e68} & Tracker v2 (\fichier{utils_v2.py}, \fichier{main_v2.py}) : modèle géométrique 3D de la tête et des yeux. \\
+26/11/2026 & \code{d23ef7e} & Amélioration de la tolérance. \\
+28/11/2026 & \code{797601f} & Recalibration continue à chaque clic et paramètres associés. \\
+28/11/2026 & \code{2f619bf} & Feuille de route (\fichier{ROADMAP.md}). \\
+\bottomrule
+\end{tabularx}
+\caption{Évolution du dépôt.}
+\label{tab:historique}
+\end{table}
+
+\section{Organisation du document}
+
+\begin{itemize}
+  \item Le chapitre~\ref{chap:archi} présente l'architecture : fichiers, threads, pipeline d'une image et objectifs de performance.
+  \item Le chapitre~\ref{chap:mediapipe} décrit ce que fournit MediaPipe et comment le code l'utilise.
+  \item Le chapitre~\ref{chap:v1} détaille le tracker v1 (régression ridge).
+  \item Les chapitres~\ref{chap:v2geo} et~\ref{chap:v2mod} détaillent le tracker v2 : géométrie 3D, puis modèle de regard et son ajustement.
+  \item Le chapitre~\ref{chap:recal} traite de la recalibration continue au clic.
+  \item Le chapitre~\ref{chap:traitements} décrit les traitements communs : clignements, filtre One Euro, recentrage.
+  \item Les chapitres~\ref{chap:interaction} et~\ref{chap:rendu} décrivent la boucle d'interaction et le rendu graphique.
+  \item Les chapitres~\ref{chap:config} et~\ref{chap:actions} décrivent la configuration et les actions.
+  \item Le chapitre~\ref{chap:bilan} fait le bilan : limites connues, incohérences relevées dans le code, pistes.
+  \item L'annexe~\ref{chap:constantes} récapitule toutes les constantes avec leur origine.
+\end{itemize}
+
+\section{Conventions}
+
+\paragraph{Origine des constantes.} Chaque constante numérique du code est classée dans l'une des quatre catégories suivantes :
+\begin{description}
+  \item[\litt] valeur reprise d'une publication ou d'une mesure physiologique connue ;
+  \item[\deriv] valeur qui découle mathématiquement d'autres grandeurs ;
+  \item[\conv] valeur conventionnelle ou imposée par une bibliothèque ;
+  \item[\empi] choix de conception réglé à l'usage. Le code ne contient ni mesure ni étude qui la justifie : le document donne l'intention et l'ordre de grandeur raisonnable, et le signale comme tel.
+\end{description}
+
+\paragraph{Notations.}
+\begin{itemize}
+  \item Les vecteurs sont en gras ($\vect{x}$), les matrices en majuscules ($R$).
+  \item $\vect{a}\cdot\vect{b}$ désigne le produit scalaire et $\|\cdot\|$ la norme euclidienne.
+  \item Les coordonnées écran sont \emph{normalisées} : $(0,0)$ est le coin haut-gauche de la fenêtre et $(1,1)$ le coin bas-droit. Une erreur de \qty{3}{\percent} signifie donc \qty{3}{\percent} de la largeur (ou de la hauteur) de la fenêtre.
+  \item $\med$ désigne la médiane et $\MAD(x) = \med|x - \med(x)|$ l'écart absolu médian.
+  \item Les noms entre \code{guillemets_machine} renvoient aux identifiants du code.
+\end{itemize}

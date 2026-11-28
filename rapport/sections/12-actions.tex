@@ -1,0 +1,121 @@
+\chapter{Actions}
+\label{chap:actions}
+
+\section{Registre}
+
+Une action est une fonction Python décorée par \code{@action(nom, aide, verifier)}. Le décorateur enregistre la fonction dans le dictionnaire global \code{ACTIONS} et lui attache trois attributs :
+\begin{itemize}
+  \item le nom employé dans la configuration ;
+  \item un texte d'aide, affiché quand le nombre d'arguments est faux ;
+  \item une fonction de vérification optionnelle, \code{verifier(args, menus)}, qui renvoie un message d'erreur ou \code{None}.
+\end{itemize}
+La fonction reçoit le contexte d'exécution (l'\code{Executeur}) puis ses arguments, toujours sous forme de chaînes :
+
+\begin{lstlisting}
+@action("gpio_impulsion", "gpio_impulsion 17 0.5   (allume pendant 0.5 s puis éteint)",
+        verifier=_verifier_gpio(("la durée", 0.01, 60)))
+def gpio_impulsion(ctx, broche, secondes):
+    ...
+\end{lstlisting}
+
+Ajouter une action revient à écrire une fonction : le chargeur de configuration, la validation et l'exécuteur la prennent en compte automatiquement.
+
+\section{Analyse}
+
+\code{analyser(texte, menus)} transforme \code{'touches CTRL+A CTRL+C'} en \code{('touches', ['CTRL+A', 'CTRL+C'])} :
+
+\begin{enumerate}
+  \item \textbf{Découpage} par \code{shlex.split}, comme dans un shell : les guillemets regroupent un argument contenant des espaces (\texttt{ecrire "Bonjour, ça va ?"}). Un guillemet non fermé donne une erreur lisible.
+  \item \textbf{Nom} : s'il est inconnu, le message propose le nom le plus proche et la liste des actions disponibles.
+  \item \textbf{Nombre d'arguments}, vérifié \emph{par introspection} : \code{inspect.signature(f).bind(None, *args)} lève une erreur si les arguments ne correspondent pas à la signature, en tenant compte des arguments optionnels (\code{nom=None}) et variables (\code{*combos}). Il n'y a rien à déclarer en plus de la fonction elle-même.
+  \item \textbf{Contenu}, par le vérificateur propre à l'action.
+\end{enumerate}
+
+\section{Exécution}
+
+\code{Executeur} possède deux files et un thread démon :
+\begin{itemize}
+  \item \code{_travaux} : les séquences à exécuter, déposées par \code{lancer(etapes)} depuis le thread principal ;
+  \item \code{vers_interface} : les ordres pour l'interface (\code{message}, \code{ouvrir}, \code{retour}, \code{accueil}, \code{calibrer}), lus par la boucle principale à chaque image.
+\end{itemize}
+
+Le thread prend les séquences une par une et exécute leurs étapes dans l'ordre :
+\begin{itemize}
+  \item une \code{ErreurAction}, c'est-à-dire une erreur prévue (appareil injoignable, broche indisponible), affiche son message à l'écran et \emph{interrompt la séquence}. On n'enchaîne pas \enquote{allumer la lumière puis ouvrir la porte} si la première étape a échoué ;
+  \item toute autre exception (un bug, un programme introuvable pour \code{lancer}) est capturée : un message \enquote{Erreur : nom} s'affiche et l'interface ne plante jamais. La séquence, elle, \emph{continue} (chapitre~\ref{chap:bilan}).
+\end{itemize}
+
+Les actions ne touchent jamais l'interface directement : pygame n'est pas conçu pour être utilisé depuis plusieurs threads. Elles déposent un ordre dans \code{vers_interface}.
+
+\section{Catalogue}
+
+\begin{longtable}{@{}p{3.2cm} p{4.8cm} p{6.9cm}@{}}
+\toprule
+Action & Syntaxe & Effet et vérification \\
+\midrule
+\endfirsthead
+\toprule
+Action & Syntaxe & Effet et vérification \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\code{touches} & \code{touches CTRL+A CTRL+C} & un ou plusieurs raccourcis ; chaque touche doit être un modificateur, une touche nommée ou un caractère unique. \textbf{Envoi non branché} (section~\ref{sec:clavier}). \\
+\code{ecrire} & \code{ecrire "texte"} & tape un texte. \textbf{Non branché.} \\
+\code{lancer} & \code{lancer firefox} & \code{subprocess.Popen} avec \code{start_new_session=True} et les sorties redirigées vers \code{/dev/null} : le programme est détaché et survit à l'interface. \\
+\code{attendre} & \code{attendre 1.5} & pause de 0 à \qty{60}{\second}, dans le thread des actions. \\
+\code{afficher} & \code{afficher "message"} & bulle à l'écran. \\
+\code{ouvrir} & \code{ouvrir Raccourcis} & sous-menu ; le nom doit exister (avec suggestion sinon). \\
+\code{retour}, \code{accueil} & \code{retour} & menu précédent, menu principal. \\
+\code{calibrer} & \code{calibrer} & relance la calibration. \\
+\code{gpio_allumer} & \code{gpio_allumer 17} & sortie numérique à l'état haut. \\
+\code{gpio_eteindre} & \code{gpio_eteindre 17} & sortie à l'état bas. \\
+\code{gpio_basculer} & \code{gpio_basculer 17} & inverse l'état. \\
+\code{gpio_impulsion} & \code{gpio_impulsion 17 0.5} & haut pendant la durée (0,01 à \qty{60}{\second}), puis bas, en arrière-plan (\code{blink(..., n=1, background=True)}) : ne bloque pas la séquence. \\
+\code{gpio_intensite} & \code{gpio_intensite 18 40} & modulation de largeur d'impulsion (PWM) de 0 à \qty{100}{\percent}. \\
+\code{gpio_lire} & \code{gpio_lire 4 "Porte"} & affiche \enquote{Porte : haut/bas}. \\
+\code{http_get} & \code{http_get 192.168.1.20/relay/0?turn=on} & requête GET. \\
+\code{http_post}, \code{http_put} & \code{http_post 192.168.1.20/api etat=on} & POST ou PUT avec un corps JSON ou texte. \\
+\code{http_lire} & \code{http_lire 192.168.1.30/temperature "Salon"} & affiche la réponse sur une ligne, tronquée à 60 caractères. \\
+\end{longtable}
+
+\section{Clavier}
+\label{sec:clavier}
+
+\begin{itemize}
+  \item \textbf{Modificateurs} : CTRL, ALT, MAJ, SHIFT, SUPER, ALTGR.
+  \item \textbf{Touches nommées} : ENTREE, ECHAP, TAB, ESPACE, RETOUR\_ARRIERE, SUPPR, INSER, HAUT, BAS, GAUCHE, DROITE, DEBUT, FIN, PAGE\_HAUT, PAGE\_BAS, F1 à F12.
+  \item Tout caractère unique est aussi accepté.
+\end{itemize}
+Les noms sont en français pour l'aidant ; leur traduction vers des codes de touches incombe au \enquote{backend} d'envoi.
+
+\begin{attention}
+\code{envoyer_combo(touches)} et \code{envoyer_texte(texte)} sont des \textbf{points d'accroche vides} : ils se contentent d'afficher \code{[CLAVIER] ...} dans la console. La validation est complète, mais aucune touche n'est envoyée au système. Le commentaire du code prévoit de les brancher sur \code{wtype} ou \code{ydotool} (Wayland), ou sur \code{uinput}, selon l'environnement graphique du Raspberry Pi ; \code{xdotool} conviendrait sous X11. C'est la première priorité de la feuille de route.
+\end{attention}
+
+\section{GPIO}
+
+\paragraph{Numérotation.} Les broches sont désignées par leur numéro BCM, celui du schéma de brochage (\enquote{GPIO17}), et non par leur position physique sur le connecteur. Les numéros valides vont de 0 à 27 : ce sont les 28 GPIO du connecteur 40 broches des Raspberry Pi (\conv). L'analyseur accepte \code{17} comme \code{GPIO17}, sans distinction de casse.
+
+\paragraph{Chargement paresseux et simulation.} \code{gpiozero} n'est importé qu'à la première action GPIO. Si le module est absent, ou si la machine n'a pas de GPIO (exception \code{BadPinFactory}, par exemple sur un PC), on bascule définitivement en \emph{mode simulé} : chaque action est affichée dans la console (\texttt{[GPIO simulé] GPIO17 allumée}), et un dictionnaire mémorise les états pour que \code{gpio_basculer} et \code{gpio_lire} restent cohérents. Une configuration domotique peut ainsi être testée entièrement sur PC. Les avertissements de \code{gpiozero}, qui en émet un pour chaque backend essayé, sont masqués pendant la création.
+
+\paragraph{Gestion des broches.} Un objet \code{gpiozero} est créé à la demande pour chaque broche, puis réutilisé. Si une broche change d'usage (sortie numérique, PWM, entrée), l'ancien objet est fermé avant d'en créer un nouveau : \code{gpiozero} refuse d'ouvrir deux fois la même broche. Un verrou (\code{_gpio_verrou}) protège ces structures, même si, en pratique, seul le thread des actions y accède. Sur Pi 4 et Pi 5, \code{gpiozero} utilise le backend \code{lgpio}.
+
+\section{HTTP}
+
+Ces actions servent à piloter des appareils du réseau local : relais Wi-Fi, prises connectées, ESP32, Home Assistant.
+
+\begin{itemize}
+  \item \textbf{Adresse} : \code{http://} est ajouté si aucun schéma n'est donné, pour qu'on puisse écrire simplement \code{192.168.1.20/on}. La vérification exige un nom d'hôte et aucune espace.
+  \item \textbf{Proxy désactivé} (\code{ProxyHandler({})}) : un proxy d'entreprise configuré dans l'environnement ne doit pas intercepter des requêtes destinées au réseau local.
+  \item \textbf{Délai} de \qty{3}{\second} (\code{HTTP_DELAI_S}, \empi) : un appareil local répond en quelques dizaines de millisecondes ; au-delà de \qty{3}{\second}, il est considéré comme injoignable et l'utilisateur est prévenu rapidement.
+  \item \textbf{Taille lue} : au plus \qty{64}{\kilo\byte} (\code{HTTP_TAILLE_MAX}). Le but est d'afficher une valeur, pas de télécharger une page.
+  \item \textbf{Corps de la requête} (\code{_corps}) :
+  \begin{itemize}
+    \item un seul argument commençant par \texttt{\{} ou \texttt{[} : JSON envoyé tel quel, après validation ;
+    \item des paires \code{cle=valeur} : JSON construit, chaque valeur étant interprétée en JSON si possible (\code{3} devient un nombre, \code{true} un booléen) et gardée comme texte sinon ;
+    \item tout autre texte : envoyé en \code{text/plain}.
+  \end{itemize}
+  \item \textbf{Erreurs} : un code HTTP d'erreur donne \enquote{\textit{hôte} a répondu erreur \textit{code}}, une absence de réponse donne \enquote{\textit{hôte} injoignable}. Ce sont des \code{ErreurAction} : elles s'affichent et interrompent la séquence.
+  \item \textbf{En-tête} \code{User-Agent: eye-tracker}, générique.
+\end{itemize}

@@ -1,0 +1,259 @@
+\chapter{Tracker v2 : géométrie 3D de la tête et des yeux}
+\label{chap:v2geo}
+
+\section{Principe}
+
+La v2 (\fichier{victor/utils_v2.py}) part de l'observation qui clôt le chapitre précédent : la v1 essaie d'\emph{apprendre} l'effet de la tête, alors que cet effet est purement géométrique. Si l'on connaît la position et l'orientation de la tête, et la direction des yeux par rapport à la tête, le point regardé se \emph{calcule} : c'est l'intersection d'un rayon 3D avec le plan de l'écran. La calibration n'a plus qu'à estimer quelques paramètres physiques propres à l'utilisateur et à l'installation (décalage de l'axe visuel, gains, position de l'écran), qui ne dépendent pas de la pose.
+
+Le chapitre décrit la partie géométrique : reconstruction 3D, pose de la tête, direction des yeux. Le chapitre~\ref{chap:v2mod} décrit le passage au point de l'écran et l'ajustement des paramètres.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.05, font=\small, >={Stealth[length=2.2mm]}]
+  % plan écran / caméra
+  \draw[very thick, doux] (0,-2.6) -- (0,2.2) node[above, black] {plan de l'écran};
+  \fill[black] (-0.25,-0.18) rectangle (0.05,0.18);
+  \node[left] at (-0.25,0) {caméra};
+  % tête
+  \draw[rounded corners=18pt, black!50] (6.2,-2.3) -- (5.2,-2.3) -- (4.6,-0.9) -- (4.75,1.4) -- (6.0,2.2) -- (8.6,2.2) -- (9.4,0.6) -- (9.2,-1.8) -- (8.4,-2.4) -- cycle;
+  \node[black!60] at (8.1,-1.8) {tête};
+  % globe
+  \coordinate (E) at (5.9,0.45);
+  \draw[thick] (E) circle (0.75);
+  \fill (E) circle (1.5pt) node[right=2pt] {$\vect{e}$};
+  % iris
+  \coordinate (I) at ($(E)+(172:0.75)$);
+  \fill[accent] (I) circle (2.4pt);
+  \node[accent, below right=1pt and -2pt] at (I) {\scriptsize iris};
+  % rayon caméra
+  \draw[dashed, ->] (0.05,0) -- ($(0.05,0)!1.12!(I)$) node[pos=0.55, below, sloped] {rayon caméra $\lambda\vect{d}$};
+  % axe optique prolongé vers l'écran
+  \draw[->, thick, accent] (E) -- ($(E)!7.9!(I)$) coordinate (P);
+  \fill[accent] (P) circle (2pt) node[left, accent] {point regardé};
+  \node[accent, above, sloped] at ($(I)!0.45!(P)$) {regard $\vect{g}$};
+  % rayon
+  \draw[<->] (E) -- ($(E)+(-30:0.75)$) node[midway, below right=-2pt] {\scriptsize $r$};
+  % profondeur
+  \draw[|<->|, doux] (5.9,-0.65) -- (0.05,-0.65) node[midway, below, black] {$\approx Z_0$ (\qtyrange{40}{80}{\centi\metre})};
+\end{tikzpicture}
+\caption{Vue de profil du modèle. Le rayon caméra passant par le pixel de l'iris est intersecté avec la sphère du globe ; le vecteur centre $\to$ iris donne l'axe de l'œil, prolongé jusqu'au plan de l'écran, qui contient la caméra.}
+\label{fig:geometrie}
+\end{figure}
+
+\section{Repères}
+
+\begin{description}
+  \item[Repère caméra] (cm) : origine au centre optique, $x$ vers la droite de l'image, $y$ vers le bas, $z$ le long de l'axe optique, vers la scène (donc vers l'utilisateur).
+  \item[Repère tête] (cm) : $x$ de l'œil A vers l'œil B, $y$ vers le bas du visage, $z$ vers l'arrière du crâne. Un regard droit devant, vers la caméra, a la direction $(0, 0, -1)$ dans ce repère.
+  \item[Pose] : une rotation $R$ (repère tête $\to$ repère caméra) et une translation $\vect{T}$ en cm, telles que $\vect{X}_\text{cam} = R\,\vect{X}_\text{tête} + \vect{T}$.
+\end{description}
+
+\section{Caméra sténopé}
+
+\code{Camera} modélise la webcam par un sténopé de focale $f$ (en pixels), sans distorsion, avec le centre optique au milieu de l'image, $\vect{c} = (w/2, h/2)$. Les webcams grand public ont une distorsion radiale faible au centre de l'image, là où se trouve le visage ; la négliger est une approximation raisonnable.
+
+\paragraph{Focale.} Sans calibration de la caméra, la focale se déduit d'un champ de vision horizontal supposé :
+\begin{equation}
+  f = \frac{w/2}{\tan(\text{HFOV}/2)}, \qquad \text{HFOV} = \ang{60} \;\Rightarrow\; f = \frac{320}{\tan \ang{30}} \approx \qty{554}{px} \text{ pour } w = 640 .
+\end{equation}
+
+\begin{origine}
+\code{CAM_HFOV_DEG = 60} (\litt{} / \empi). Les webcams d'ordinateurs portables et les webcams USB courantes ont un champ horizontal de l'ordre de \ang{55} à \ang{70}. Une erreur sur cette valeur fausse surtout l'estimation de la \emph{distance} de la tête ; c'est pourquoi le modèle de regard a un paramètre de correction de focale, $k_f$ (section~\ref{sec:focale}). Si la résolution réelle de la caméra change en cours de route, la focale est remise à l'échelle proportionnellement à la largeur (\code{self.cam.f * w / self.cam.w}).
+\end{origine}
+
+\paragraph{Rayon d'un pixel.} Le rayon issu du centre optique qui passe par le pixel $(u, v)$ a pour direction, non normalisée,
+\begin{equation}
+  \vect{d}(u, v) = \Big(\frac{u - c_x}{f},\ \frac{v - c_y}{f},\ 1\Big).
+\end{equation}
+
+\section{Rétroprojection des landmarks}
+\label{sec:retroprojection}
+
+\code{Camera.backproject} reconstruit en 3D les points rigides du visage \emph{à un facteur d'échelle près}.
+
+Soit un point du visage à la profondeur $Z = Z_0 + \Delta Z$, où $Z_0$ est la profondeur de référence de la tête. La projection perspective donne exactement $u = c_x + f X/Z$ et $v = c_y + f Y/Z$, donc
+\begin{equation}
+  \vect{X} = Z\,\vect{d}(u, v).
+\end{equation}
+MediaPipe fournit, après conversion en pixels, $z_\text{px} \approx f\,\Delta Z / Z_0$ (chapitre~\ref{chap:mediapipe}), d'où $Z = Z_0 (1 + z_\text{px}/f)$ et
+\begin{equation}
+  \boxed{\ \vect{X} = Z_0\,\Big(1 + \frac{z_\text{px}}{f}\Big)\,\vect{d}(u, v)\ }
+  \qquad\Longrightarrow\qquad
+  \vect{q} \coloneqq \frac{\vect{X}}{Z_0} = \Big(1 + \frac{z_\text{px}}{f}\Big)\vect{d}(u, v).
+\end{equation}
+
+Le code calcule $\vect{q}$, qui ne dépend pas de l'inconnue $Z_0$. Tous les points sont simplement divisés par la même distance, et ce facteur commun sera retrouvé comme facteur d'échelle de l'alignement de Procrustes. Ce calcul n'utilise \emph{aucune} approximation orthographique : une tête décalée sur le côté de l'image, ou proche de la caméra, est traitée avec la perspective exacte (aux erreurs de $z$ près).
+
+\section{Alignement de Procrustes (méthode d'Umeyama)}
+\label{sec:umeyama}
+
+\subsection{Problème}
+
+\code{umeyama(x, y, w)} cherche la similarité (échelle $s > 0$, rotation $R$, translation $\vect{t}$) qui envoie au mieux un nuage $\{\vect{x}_i\}$ sur un nuage $\{\vect{y}_i\}$ mis en correspondance, au sens des moindres carrés pondérés :
+\begin{equation}
+  \min_{s,\,R \in SO(3),\,\vect{t}} \ \sum_i w_i \,\big\|\vect{y}_i - (s R \vect{x}_i + \vect{t})\big\|^2 .
+\end{equation}
+Le problème est non linéaire à cause de la contrainte $R \in SO(3)$, mais il a une solution exacte, sans itération \cite{umeyama1991}.
+
+\subsection{Solution}
+
+Avec les poids normalisés $\tilde w_i = w_i / \sum_k w_k$ :
+\begin{enumerate}
+  \item centres pondérés : $\bar{\vect{x}} = \sum \tilde w_i \vect{x}_i$, $\bar{\vect{y}} = \sum \tilde w_i \vect{y}_i$ ; nuages centrés $\vect{x}'_i$, $\vect{y}'_i$ ;
+  \item matrice de covariance croisée : $\Sigma = \sum_i \tilde w_i\, \vect{y}'_i \vect{x}'^{\top}_i \in \R^{3\times3}$ ;
+  \item décomposition en valeurs singulières : $\Sigma = U D V\T$ ;
+  \item correction de signe : $S = \diag(1, 1, \sign(\det U \det V))$ ;
+  \item $R = U S V\T$, \quad $s = \dfrac{\tr(D S)}{\sum_i \tilde w_i \|\vect{x}'_i\|^2}$, \quad $\vect{t} = \bar{\vect{y}} - s R \bar{\vect{x}}$.
+\end{enumerate}
+
+\paragraph{Justification.} À $s$ et $R$ fixés, la translation optimale aligne les centres, d'où $\vect{t}$. Il reste à maximiser $\tr(R\T \Sigma)$ sur les rotations. En écrivant $\Sigma = U D V\T$, on a $\tr(R\T U D V\T) = \tr(D\,M)$ avec $M = U\T R V$ orthogonale. Ce produit est maximal pour $M = I$, soit $R = U V\T$. Si cette matrice est une réflexion ($\det = -1$), la meilleure rotation inverse l'axe associé à la plus petite valeur singulière : c'est le rôle de $S$. L'échelle optimale s'obtient ensuite en annulant la dérivée par rapport à $s$, qui est un problème quadratique en une variable.
+
+\paragraph{Quelques mots sur la SVD.} Toute matrice réelle $\Sigma$ s'écrit $U D V\T$, avec $U$ et $V$ orthogonales et $D$ diagonale positive. Géométriquement, $\Sigma$ est une rotation ($V\T$), suivie d'étirements le long des axes ($D$), suivie d'une autre rotation ($U$). Pour une matrice $3\times3$, le calcul est quasi instantané. La SVD sert deux fois dans la v2 : ici, pour l'alignement, et pour trouver la normale au visage (section~\ref{sec:repere-visage}).
+
+\section{Modèle de tête propre à l'utilisateur}
+\label{sec:headmodel}
+
+\code{HeadModel.build} construit, une seule fois à la fin de la calibration, la forme 3D rigide du visage de l'utilisateur en centimètres, ainsi que la position de ses deux globes oculaires.
+
+\subsection{Points rigides}
+
+Seuls 69 points du maillage (\code{RIGID_IDX}) sont utilisés : nez (15 points), front (14), coins des yeux et orbites (12), pommettes (14), tempes et côtés du visage (14). La bouche, la mâchoire, les sourcils et les paupières sont exclus : ils bougent avec la parole et les expressions et fausseraient l'estimation de la pose. Ces points ont été choisis à la main parmi les régions osseuses du visage (\empi).
+
+\subsection{Procrustes généralisé robuste}
+
+\begin{algorithm}[H]
+\caption{Construction de la forme moyenne (\code{HeadModel.build})}
+\KwIn{landmarks de $F$ images de la calibration}
+\If{$F > 150$}{garder 150 images régulièrement espacées dans le temps}
+rétroprojeter : nuages $Q_1, \dots, Q_F$ (69 points chacun)\;
+$M \leftarrow Q_1$ centré et normalisé (RMS $= 1$)\;
+\For{4 itérations}{
+  \For{$k = 1..F$}{$(s_k, R_k, \vect{t}_k) \leftarrow$ \code{umeyama}$(Q_k, M)$ ; \quad $\tilde Q_k \leftarrow s_k Q_k R_k\T + \vect{t}_k$}
+  $M \leftarrow$ médiane point par point des $\tilde Q_k$\;
+  $M \leftarrow$ centré, puis normalisé à une distance RMS au centre de 1\;
+}
+\Return{$M$}
+\end{algorithm}
+
+C'est l'analyse de Procrustes généralisée \cite{gower1975}, avec deux adaptations :
+\begin{itemize}
+  \item \textbf{Médiane au lieu de moyenne.} Une image où MediaPipe a mal placé le visage (début de clignement, flou de mouvement) ne déforme pas la forme moyenne : la médiane résiste à une minorité d'images aberrantes.
+  \item \textbf{Normalisation à chaque itération.} Sans elle, la procédure peut dériver vers la solution triviale $M \to 0$ (tous les nuages réduits à un point, erreur nulle). Fixer la taille RMS à 1 rend la forme bien définie à une similarité près.
+\end{itemize}
+
+\begin{origine}
+\code{MODEL_MAX_FRAMES = 150} (\empi) : limite le coût ($150 \times 4$ alignements) tout en gardant des images de toute la calibration, y compris de la phase tête en mouvement. Le sous-échantillonnage est régulier (\code{np.linspace}), et non aléatoire, pour couvrir uniformément toutes les poses. \textbf{4 itérations} (\empi) : en pratique, l'analyse de Procrustes généralisée converge en deux ou trois itérations.
+\end{origine}
+
+\subsection{Échelle métrique}
+
+La forme $M$ n'a pas d'unité. On la met en centimètres en imposant la distance entre les yeux. On note $\vect{m}_A$ et $\vect{m}_B$ les milieux des coins de chaque œil :
+\begin{equation}
+  k = \frac{\text{IPD}}{\|\vect{m}_B - \vect{m}_A\|}, \qquad M_\text{cm} = k\,M, \qquad \text{IPD} = \qty{6.3}{\centi\metre}.
+\end{equation}
+
+\begin{origine}
+\code{IPD_CM = 6.3} (\litt). La distance interpupillaire moyenne d'un adulte est d'environ \qty{63}{\milli\metre} : \qty{\approx 64.7}{\milli\metre} chez les hommes, \qty{\approx 62.3}{\milli\metre} chez les femmes, avec un écart-type d'environ \qty{3.5}{\milli\metre} \cite{dodgson2004}. Le milieu des coins de l'œil est proche du centre de la pupille en regard droit devant ; l'approximation $\|\vect{m}_B - \vect{m}_A\| \approx \text{IPD}$ est donc raisonnable. Une IPD réelle différente de \qty{5}{\percent} fausse toutes les longueurs de \qty{5}{\percent}, distance comprise. Cette erreur est absorbée par la correction de distance $k_f$ et par l'application affine vers l'écran (chapitre~\ref{chap:v2mod}).
+\end{origine}
+
+\subsection{Repère du visage}
+\label{sec:repere-visage}
+
+\begin{enumerate}
+  \item \textbf{Axe $z$} : on fait la SVD du nuage centré $M_\text{cm} - \bar M$. Le troisième vecteur singulier droit est la direction de \emph{moindre variance}, c'est-à-dire la normale au plan qui approche le mieux le visage. Il est orienté pour avoir une composante $z$ positive. La forme a été construite dans des coordonnées issues de la caméra, où $+z$ s'éloigne de la caméra : $z$ pointe donc vers l'arrière du crâne.
+  \item \textbf{Axe $x$} : direction $\vect{m}_B - \vect{m}_A$, rendue orthogonale à $z$ par Gram-Schmidt, puis normalisée.
+  \item \textbf{Axe $y$} $= z \times x$ : pour $z$ vers l'arrière et $x$ vers la droite de l'image, $y$ pointe vers le bas.
+\end{enumerate}
+Les points et les milieux des yeux sont exprimés dans cette base, $P = M_\text{cm}\,[\vect{x}\ \vect{y}\ \vect{z}]$.
+
+\subsection{Centres des globes oculaires}
+
+\begin{equation}
+  \vect{e}_A = \vect{m}_A + (0, 0, \delta), \qquad \vect{e}_B = \vect{m}_B + (0, 0, \delta), \qquad \delta = \qty{1.0}{\centi\metre}.
+\end{equation}
+
+\begin{origine}
+\code{EYE_DEPTH_CM = 1.0} et \code{EYE_RADIUS_CM = 1.15} (\litt{} pour l'ordre de grandeur, \empi{} pour la valeur exacte). Le globe oculaire humain a un diamètre axial d'environ \qty{24}{\milli\metre}, et son centre de rotation se situe environ \qtyrange{13}{14}{\milli\metre} derrière le sommet de la cornée. La pupille apparente, celle que l'on voit à travers la cornée, se trouve à quelques millimètres derrière ce sommet : la distance centre de rotation -- pupille apparente vaut donc de l'ordre de \qtyrange{10}{12}{\milli\metre}. Les modèles géométriques classiques de l'œil donnent des valeurs du même ordre \cite{guestrin2006,hansen2010}. De même, le plan des coins de l'œil passe à peu près au niveau de l'iris : placer le centre du globe \qty{1}{\centi\metre} derrière ce plan est cohérent. Ces deux valeurs restent \emph{approximatives}. Une erreur sur le rayon $r$ change l'angle déduit d'un déplacement de l'iris d'un facteur à peu près constant ($\Delta\text{iris} \approx r \sin\theta$), et elle est absorbée par les \emph{gains} angulaires appris à la calibration (section~\ref{sec:correction-angles}).
+\end{origine}
+
+\section{Pose de la tête à chaque image}
+\label{sec:pose}
+
+\code{HeadModel.pose} estime à chaque image la pose de la tête à partir des 69 points rétroprojetés $\vect{q}_k$ (section~\ref{sec:retroprojection}) et du modèle $P_k$ (en cm).
+
+\subsection{Retrouver la distance}
+
+On aligne le modèle sur l'observation, $\vect{q}_k \approx s R P_k + \vect{t}$. La vraie pose vérifie $\vect{X}_k = R P_k + \vect{T}$ et $\vect{q}_k = \vect{X}_k / Z_0$, d'où par identification
+\begin{equation}
+  s = \frac{1}{Z_0}, \qquad \vect{t} = \frac{\vect{T}}{Z_0} \quad\Longrightarrow\quad \vect{T} = \frac{\vect{t}}{s} \ \text{(en cm)}.
+\end{equation}
+L'échelle de Procrustes donne donc directement la distance de la tête, en centimètres grâce à l'IPD du modèle. \code{pose} renvoie $(R, \vect{t}/s, s)$, et la mesure est rejetée si $s \leq 0$ ou si $R$ contient des valeurs non finies.
+
+\subsection{Moindres carrés repondérés}
+
+Un landmark mal placé (cheveux, main devant le visage, reflet de lunettes) ne doit pas fausser la pose. Après un premier alignement non pondéré, deux passes de moindres carrés itérativement repondérés (IRLS \cite{holland1977}) attribuent à chaque point le poids de Cauchy :
+\begin{equation}
+  \rho_k = \big\|\vect{q}_k - (sRP_k + \vect{t})\big\|, \qquad
+  \hat\sigma = \num{1.4826}\,\med_k(\rho_k) + 10^{-9}, \qquad
+  w_k = \frac{1}{1 + \big(\rho_k / (\num{2.5}\,\hat\sigma)\big)^2} .
+\end{equation}
+
+\begin{origine}
+\textbf{Poids de Cauchy} (\litt) : c'est le poids de l'estimateur M de Cauchy, $\rho(r) = \tfrac{c^2}{2}\log(1 + (r/c)^2)$. Il réduit continûment l'influence des grands résidus sans jamais l'annuler tout à fait, ce qui le rend stable même si l'alignement initial est imparfait. La constante classique $c = \num{2.385}\,\sigma$ donne une efficacité de \qty{95}{\percent} sous bruit gaussien \cite{holland1977} ; le code prend $c = \num{2.5}\,\hat\sigma$, très proche (\empi). L'échelle $\hat\sigma$ est la médiane des \emph{normes} de résidus multipliée par la constante de cohérence \num{1.4826}. Le terme $10^{-9}$ évite une division par zéro quand l'ajustement est parfait. \textbf{Deux passes} (\empi) suffisent : le premier alignement est déjà bon, et les poids se stabilisent aussitôt.
+\end{origine}
+
+\subsection{Angles d'Euler et garde-fou}
+
+\code{euler_deg(R)} convertit la rotation en angles lisibles. La direction du visage est $\vect{a} = -R_{:,3}$ (opposée à l'axe $z$ de la tête, qui pointe vers l'arrière) :
+\begin{equation}
+  \text{yaw} = \atantwo(a_x, -a_z), \qquad \text{pitch} = \atantwo\!\big(a_y, \sqrt{a_x^2 + a_z^2}\big), \qquad \text{roll} = \atantwo(R_{10}, R_{00}).
+\end{equation}
+Un yaw positif signifie un visage tourné vers la droite de l'image, un pitch positif une tête baissée. Ces angles servent à l'affichage de debug, à l'attribut \code{head_pose} (avec la distance $O_z$) et au garde-fou : si $|\text{yaw}|$ ou $|\text{pitch}|$ dépasse \ang{50} (\code{MAX_HEAD_ANGLE_DEG}, \empi), la mesure est jetée. La v2 tolère des angles plus grands que la v1 (\ang{40}/\ang{35}) parce que le modèle 3D gère correctement la perspective ; au-delà de \ang{50}, un œil est en pratique masqué par le nez.
+
+\section{Direction des yeux par rapport à la tête}
+\label{sec:observe}
+
+\code{HeadModel.observe} est le cœur géométrique de la v2. Pour chaque image, elle renvoie l'origine du regard et sa direction \emph{dans le repère de la tête}.
+
+\subsection{Centres des globes dans le repère caméra}
+
+\begin{equation}
+  \vect{e}^\text{cam}_j = \vect{T} + R\,\vect{e}_j, \qquad j \in \{A, B\}.
+\end{equation}
+Par sécurité, on projette ces centres dans l'image, $\pi(\vect{e}) = f\,(e_x/e_z, e_y/e_z) + \vect{c}$, et on associe chaque iris détecté au centre projeté le plus proche. Les deux iris sont échangés si nécessaire.
+
+\subsection{Intersection rayon -- sphère}
+
+L'iris est un point de la surface du globe : il se trouve sur le rayon caméra $\lambda\,\vect{d}$ de son pixel \emph{et} sur la sphère de centre $\vect{e}$ et de rayon $r$ :
+\begin{equation}
+  \|\lambda\vect{d} - \vect{e}\|^2 = r^2
+  \iff a\lambda^2 - 2b\lambda + c = 0, \qquad a = \vect{d}\cdot\vect{d},\ \ b = \vect{d}\cdot\vect{e},\ \ c = \vect{e}\cdot\vect{e} - r^2 .
+\end{equation}
+Si le discriminant réduit $\Delta = b^2 - ac$ est positif, la racine la plus petite,
+\begin{equation}
+  \lambda = \frac{b - \sqrt{\Delta}}{a},
+\end{equation}
+correspond au point de la sphère le plus proche de la caméra, donc à la face visible du globe. Si $\Delta \leq 0$, le rayon manque la sphère (bruit, ou modèle imparfait) ; on prend alors le point du rayon le plus proche du centre, $\lambda = b/a$, qui minimise $\|\lambda\vect{d} - \vect{e}\|$.
+
+\subsection{Axe optique et angles œil/tête}
+
+L'axe de l'œil est le vecteur unitaire du centre du globe vers l'iris, ramené dans le repère tête :
+\begin{equation}
+  \vect{g}_j = R\T\,\frac{\lambda\vect{d} - \vect{e}^\text{cam}_j}{\|\lambda\vect{d} - \vect{e}^\text{cam}_j\|} .
+\end{equation}
+Les deux yeux regardent le même point et sont à peu près parallèles à distance d'écran. On moyenne donc leurs axes, $\vect{v} = (\vect{g}_A + \vect{g}_B)/\|\vect{g}_A + \vect{g}_B\|$, ce qui réduit le bruit d'un facteur $\approx\sqrt2$. On en tire deux angles :
+\begin{equation}
+  \boxed{\ \theta = \atantwo(v_x,\ -v_z), \qquad \varphi = \atantwo\!\Big(v_y,\ \sqrt{v_x^2 + v_z^2}\Big)\ }
+\end{equation}
+$\theta$ est l'angle horizontal (positif vers l'œil B), $\varphi$ l'angle vertical (positif vers le bas), et le regard droit devant ($\vect{v} = (0,0,-1)$) donne $\theta = \varphi = 0$.
+
+\paragraph{Invariance à la pose.} Comme $\vect{v}$ est exprimé dans le repère tête, $(\theta, \varphi)$ décrit la rotation de l'œil \emph{dans son orbite}. Si l'on tourne la tête en gardant les yeux sur le même point, $R$ change, et $(\theta, \varphi)$ change exactement de ce qu'il faut pour compenser. C'est cette séparation entre pose de la tête et rotation de l'œil qui rend la v2 robuste : le modèle de regard n'a plus à apprendre l'effet de la tête.
+
+\paragraph{Sortie.} \code{observe} renvoie
+\begin{itemize}
+  \item \code{O} : le milieu des deux centres de globe, dans le repère caméra (cm), origine du rayon de regard ;
+  \item \code{R} : la rotation de la tête ;
+  \item \code{ang} : $(\theta, \varphi)$ ;
+  \item \code{dirs} : les deux axes séparés (non utilisés en aval).
+\end{itemize}
+En cas d'erreur numérique (\code{LinAlgError}, \code{ValueError}, \code{ZeroDivisionError}), l'image est ignorée.

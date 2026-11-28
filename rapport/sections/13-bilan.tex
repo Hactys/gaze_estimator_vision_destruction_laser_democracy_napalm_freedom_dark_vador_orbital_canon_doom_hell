@@ -1,0 +1,86 @@
+\chapter{Prototypes, bilan et perspectives}
+\label{chap:bilan}
+
+\section{Les prototypes à la racine du dépôt}
+
+Trois fichiers à la racine sont les étapes qui ont précédé \fichier{victor/}. L'interface ne les utilise plus.
+
+\subsection{\texorpdfstring{\fichier{main.py}}{main.py} : sélection sans calibration}
+
+Le premier prototype affiche une grille $3\times3$ dans une fenêtre OpenCV de $480\times480$ pixels, et suppose une tête immobile. Pour chaque œil, \code{eye_ratio} calcule :
+\begin{itemize}
+  \item un rapport horizontal $r_x = (p_x - x_\text{min})/(x_\text{max} - x_\text{min})$ entre les deux coins ;
+  \item un rapport vertical $r_y = 0.5 + (p_y - y_\text{ligne})/h_\text{œil}$, où $y_\text{ligne}$ est l'ordonnée de la droite des coins à l'abscisse de l'iris, et $h_\text{œil}$ la hauteur paupière haute -- paupière basse ; $r_y$ est borné à $[0, 1]$.
+\end{itemize}
+Les rapports des deux yeux sont moyennés, puis lissés par une moyenne exponentielle de poids \num{0.35} par image (constante de temps d'environ 2,3 images). La case est obtenue par \emph{seuillage direct} : colonnes séparées en $r_x = \num{0.42}$ et \num{0.58}, lignes en $r_y = \num{0.54}$ et \num{0.58}. Une fixation de \qty{0.8}{\second} sélectionne la case, qui est mise en évidence pendant \qty{0.4}{\second}.
+
+Ce prototype a montré les limites qui ont guidé la suite :
+\begin{itemize}
+  \item seuils fixes, réglés pour une personne et une position. La bande verticale centrale ne fait que \num{0.04} de large, ce qui rend la ligne du milieu presque impossible à tenir ;
+  \item instabilité verticale due à la normalisation par la hauteur de l'œil (chapitre~\ref{chap:v1}) ;
+  \item aucune compensation de la tête.
+\end{itemize}
+
+\subsection{\texorpdfstring{\fichier{test_xav.py}}{test_xav.py} : le tracker \enquote{précision}}
+
+Ce programme autonome introduit tout ce que reprend la v1 : repère propre à chaque œil, normalisation par la largeur, blendshapes, compensation de la tête, calibration 16 points avec régression ridge et validation croisée LOPO, filtre One Euro, gel pendant les clignements. Il corrige aussi le signe vertical : $y$ croît vers le bas dans l'image comme à l'écran, alors qu'une version antérieure calculait $1 - y$. \fichier{victor/utils.py} en est la version découpée en briques réutilisables et exécutée dans un thread.
+
+\subsection{\texorpdfstring{\fichier{landmarks_visu.py}}{landmarks_visu.py}}
+
+C'est un outil de visualisation qui dessine en direct les landmarks MediaPipe sur l'image de la webcam. Il sert à choisir les indices de points et à vérifier la détection.
+
+\section{Ce qui fonctionne}
+
+\begin{itemize}
+  \item Chaîne complète webcam $\to$ regard $\to$ sélection par fixation $\to$ action, avec deux estimateurs de regard interchangeables.
+  \item Compensation géométrique des mouvements de la tête (v2), avec un modèle 3D propre à l'utilisateur et une calibration en deux phases qui sépare effets de l'œil et effets de la distance.
+  \item Recalibration continue à chaque clic, ancrée sur la calibration.
+  \item Interface optimisée pour Raspberry Pi : rendu incrémental, caches, threads découplés.
+  \item Configuration multi-format, entièrement validée au chargement, avec messages localisés.
+  \item Actions GPIO et HTTP fonctionnelles, avec un mode simulé pour tester sur PC.
+  \item Mode souris pour concevoir les menus sans caméra.
+\end{itemize}
+
+\section{Limites et incohérences relevées}
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l L l@{}}
+\toprule
+Sujet & Constat & Section \\
+\midrule
+Clavier & \code{touches} et \code{ecrire} n'envoient rien au système (points d'accroche vides). & \ref{sec:clavier} \\
+Calibration & \code{save_calibration} et \code{load_calibration} ne sont jamais appelées : recalibration à chaque lancement. & \ref{chap:recal} \\
+Valeurs par défaut & Huit réglages ont des valeurs différentes dans \fichier{config.py} et \fichier{config.yaml}, contrairement à ce qu'affirme l'en-tête du YAML. & \ref{chap:config} \\
+Séquences & Une exception imprévue n'interrompt pas la séquence, contrairement à une \code{ErreurAction}. & \ref{chap:actions} \\
+En-tête & L'en-tête compte comme la première ligne de cases pour la détection. & \ref{sec:disposition} \\
+Mise en page & Le dernier essai de taille de texte peut ne pas correspondre à la mise en page calculée. & \ref{chap:rendu} \\
+Validation v2 & L'erreur LOPO est approchée (3 itérations à chaud) et légèrement optimiste. & \ref{chap:v2mod} \\
+Code dupliqué & \fichier{main.py} et \fichier{main_v2.py} partagent \code{Navigation}, \code{Selecteur}, \code{TrackerSouris} et la boucle. & \ref{chap:interaction} \\
+Outillage & Pas de fichier de dépendances, pas de tests automatisés, pas de mesures de performance. & \ref{sec:perf} \\
+\bottomrule
+\end{tabularx}
+\caption{Limites connues.}
+\end{table}
+
+\paragraph{Hypothèses du modèle géométrique.} La v2 repose sur des valeurs moyennes : champ de vision de \ang{60}, distance interpupillaire de \qty{6.3}{\centi\metre}, globe de rayon \qty{1.15}{\centi\metre} centré \qty{1}{\centi\metre} derrière les coins, écran dans le plan de la caméra, pas de distorsion de l'objectif. La calibration en absorbe l'essentiel par les gains, les décalages, la correction de distance $k_f$, l'inclinaison et l'affine. Une webcam très grand-angle (forte distorsion), une caméra éloignée de l'écran (écran externe avec webcam posée à côté) ou des lunettes à fort reflet dégradent cependant le résultat. La profondeur $z$ de MediaPipe est aussi une estimation apprise, plus bruitée que $x$ et $y$.
+
+\paragraph{Constantes empiriques.} Une grande partie des constantes (annexe~\ref{chap:constantes}) relève de choix de conception non mesurés. Les plus influentes, et les premières à étudier, sont :
+\begin{itemize}
+  \item \code{duree_clic}, compromis entre vitesse et clics involontaires ;
+  \item \code{FIT_SIGMA}, qui fixe le poids des a priori ;
+  \item \code{recalibration_part_centre} et \code{recalibration_poids}, qui fixent la réactivité de la recalibration ;
+  \item les réglages du filtre One Euro.
+\end{itemize}
+
+\section{Perspectives}
+
+Elles reprennent la feuille de route (\fichier{ROADMAP.md}) :
+\begin{enumerate}
+  \item \textbf{Backend clavier} : détection automatique \code{wtype}/\code{ydotool} (Wayland), \code{xdotool} (X11) ou \code{uinput}, gestion de l'AZERTY et des caractères accentués, message clair si aucun backend n'est disponible.
+  \item \textbf{Persistance de la calibration} : chargement au démarrage et sauvegarde après chaque calibration réussie.
+  \item \textbf{Qualité du suivi} : afficher l'erreur validée et proposer de recommencer si elle est mauvaise ; indicateur de visage perdu, de tête trop tournée ou de mauvais éclairage ; mode \enquote{pause} et mode \enquote{sûr} quand l'utilisateur ne regarde pas l'écran.
+  \item \textbf{Mesures} : protocole fixe (cibles de test après calibration, tête immobile puis en mouvement) pour comparer v1 et v2, et pour régler \code{duree_clic}, $\alpha$ (en mesurant $\sigma_U$ et $\sigma_\varepsilon$, chapitre~\ref{chap:recal}), $f_{\min}$ et $\beta$ avec de vrais utilisateurs.
+  \item \textbf{Nettoyage} : un seul point d'entrée (\code{--tracker v1|v2}), classes partagées dans un module, fichier de dépendances, tests unitaires de ce qui se teste sans caméra (configuration, analyse des actions, \code{umeyama}, pose, intersection rayon -- sphère).
+  \item \textbf{Déploiement sur Raspberry Pi} : mesure de la cadence réelle, lancement automatique (service systemd), script d'installation (dépendances, droits \code{uinput} et GPIO, modèle).
+\end{enumerate}

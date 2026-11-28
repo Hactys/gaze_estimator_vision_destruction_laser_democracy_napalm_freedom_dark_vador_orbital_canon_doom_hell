@@ -1,0 +1,203 @@
+\chapter{Boucle d'interaction}
+\label{chap:interaction}
+
+Ce chapitre décrit \fichier{main_v2.py} et la géométrie de l'écran (\code{Disposition} dans \fichier{interface.py}), c'est-à-dire tout ce qui transforme le regard en clics.
+
+\section{Démarrage}
+
+\begin{enumerate}
+  \item \textbf{Arguments.} Le premier argument qui ne commence pas par \code{--} est le chemin de la configuration ; \code{--souris} active le mode souris. Sans chemin, \code{config.chercher} prend le premier fichier existant parmi \fichier{config.yaml}, \fichier{config.yml}, \fichier{config.toml} et \fichier{config.json}, à côté du script.
+  \item \textbf{Configuration.} \code{config.charger} ; en cas d'\code{ErreurConfig}, la liste complète des erreurs est affichée et le programme s'arrête avec le code 1.
+  \item \textbf{Fenêtre.} pygame est initialisé ; la fenêtre est en plein écran (\code{FULLSCREEN}, résolution native) ou fenêtrée et redimensionnable, puis \code{Rendu.construire} calcule la disposition.
+  \item \textbf{Tracker.} \code{TrackerSouris}, ou \code{utils_v2.GazeTracker} configuré à partir de la section \code{avance} (caméra, résolution, seuil de clignement, filtre, recalibration). L'import de \code{utils_v2}, et donc de MediaPipe et d'OpenCV, n'a lieu qu'à ce moment-là : il prend plusieurs secondes, et le mode souris s'en passe.
+  \item \textbf{Boucle.} Après \code{tracker.start()}, création de \code{Navigation}, \code{Selecteur} et \code{Executeur}, puis boucle tant que \code{tracker.alive}. Un bloc \code{finally} garantit la fermeture du tracker (thread, caméra, MediaPipe) et de pygame, même après une exception.
+\end{enumerate}
+
+\section{Navigation dans les menus}
+
+\code{Navigation} gère une \emph{pile} de couples \code{[menu, page]}, qui vaut initialement \code{[["principal", 0]]}.
+
+\begin{itemize}
+  \item \textbf{Pagination.} Une page contient $L\times C$ boutons, avec $L\times C$ la taille de la grille. Le nombre de pages d'un menu de $n$ boutons est $\max(1, \lceil n/(LC) \rceil)$, et \code{boutons()} renvoie la page courante complétée par des \code{None} (cases vides). Le bouton Retour automatique des sous-menus compte dans $n$.
+  \item \textbf{Défilement circulaire.} \code{defiler(s)} fait $\text{page} \leftarrow (\text{page} + s) \bmod n_\text{pages}$ : depuis la dernière page, la bande droite ramène à la première. L'utilisateur n'est jamais bloqué en bout de menu.
+  \item \textbf{Pile.} \code{ouvrir} empile un menu (page 0), \code{retour} dépile (jamais en dessous du menu principal), \code{accueil} ne garde que le menu principal. Chaque niveau mémorise sa page : revenir d'un sous-menu ramène à la page qu'on avait quittée.
+  \item \textbf{Fil d'Ariane.} \code{fil()} affiche par exemple \enquote{Accueil › Raccourcis › Navigateur} dans l'en-tête.
+\end{itemize}
+
+\section{Sélection par fixation}
+
+\subsection{Le problème du toucher de Midas}
+
+Avec un dispositif de pointage par le regard, on regarde tout ce que l'on lit. Si regarder suffisait à cliquer, chaque coup d'œil déclencherait une action : c'est le problème du \enquote{toucher de Midas} \cite{jacob1991}. La solution classique est la \emph{fixation prolongée} (\emph{dwell time}) : une cible ne se déclenche qu'après un temps de fixation continue. En saisie de texte par le regard, les utilisateurs entraînés descendent à des durées de l'ordre de \qtyrange{0.5}{1}{\second}, et les débutants ont besoin de plus \cite{majaranta2002}.
+
+\begin{origine}
+\code{duree_clic = 2.0} s (\empi, bornes \qtyrange{0.2}{30}{\second}). C'est une valeur prudente pour un utilisateur débutant et une précision webcam modeste. Le premier prototype utilisait \qty{0.8}{\second} (\code{DWELL_SECONDS}), plus vif, mais avec un risque nettement plus élevé de clics involontaires. Chaque bouton peut avoir sa propre durée : dans \fichier{config.yaml}, \enquote{Annuler} et \enquote{Recalibrer} demandent \qty{3}{\second}, parce que ce sont des actions à conséquence.
+\end{origine}
+
+\subsection{Machine à états du sélecteur}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=14mm and 30mm, font=\small, >={Stealth[length=2.2mm]},
+  etat/.style={draw, rounded corners=6pt, minimum width=30mm, minimum height=10mm, align=center, fill=white},
+  lab/.style={font=\scriptsize, align=center, fill=white, inner sep=1.5pt}]
+  \node[etat] (rien) {Aucune cible\\{\scriptsize zone morte, vide, regard perdu}};
+  \node[etat, right=of rien, fill=accent!8] (fix) {Fixation\\{\scriptsize anneau $= (t - t_0)/D$}};
+  \node[etat, below=of fix, fill=orange!8] (bloq) {Bloqué\\{\scriptsize anneau masqué}};
+  \draw[->] (rien) to[bend left=12] node[lab, above] {entrée sur une cible\\$t_0 \leftarrow t$} (fix);
+  \draw[->] (fix) to[bend left=12] node[lab, below] {sortie} (rien);
+  \draw[->] (fix) -- node[lab, right] {$t - t_0 \geq D$\\\textbf{clic}} (bloq);
+  \draw[->] (bloq) -| node[lab, pos=0.25, below] {changement de cible} (rien);
+  \draw[->] (fix) edge[loop right] node[lab, right] {bande : clic,\\puis $t_0 \leftarrow t$\\(répétition)} (fix);
+\end{tikzpicture}
+\caption{Machine à états de \code{Selecteur}. $D$ est la durée de clic de la cible.}
+\label{fig:selecteur}
+\end{figure}
+
+\code{Selecteur.update(cible, now, duree, repeter)} :
+\begin{itemize}
+  \item si la cible change, on la mémorise, $t_0 \leftarrow \text{now}$, et on lève le blocage ;
+  \item si la durée vaut \code{None} (cible non cliquable) ou si la cible est bloquée, rien ne se passe ;
+  \item si $\text{now} - t_0 \geq D$ : clic. Pour une bande (\code{repeter=True}), le chrono repart aussitôt, et rester sur la bande fait défiler une page toutes les $D$ secondes. Pour un bouton, la cible est bloquée : il faut la quitter puis revenir pour recliquer, ce qui empêche les rafales.
+\end{itemize}
+\code{progression(now, duree)} renvoie $\min((\text{now} - t_0)/D, 1)$, ou 0 si la cible est bloquée ou absente ; c'est le remplissage de l'anneau.
+
+\code{bloquer()} est appelé après chaque action de navigation. Quand un sous-menu s'ouvre, un nouveau bouton apparaît exactement sous le regard. Sans blocage, il se déclencherait $D$ secondes plus tard sans que l'utilisateur l'ait choisi.
+
+\section{Géométrie de l'écran}
+\label{sec:disposition}
+
+\code{Disposition(w, h, ecran)} calcule toutes les zones en pixels, une fois par taille de fenêtre. La \emph{même} géométrie sert au dessin et à la détection : ce qui est dessiné comme un bouton est exactement ce qui se déclenche.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=0.11mm, y=0.11mm, font=\scriptsize]
+  % écran 1280x720
+  \draw[thick] (0,0) rectangle (1280,720);
+  % en-tête
+  \fill[black!5] (0,720) rectangle (1280,677);
+  \node at (640,698) {en-tête : fil d'Ariane · pages · statut};
+  % bandes (12 %)
+  \fill[accent!12] (9,9) rectangle (148,677);
+  \fill[accent!12] (1132,9) rectangle (1271,677);
+  \node[align=center] at (78,343) {bande\\gauche\\$\langle$};
+  \node[align=center] at (1202,343) {bande\\droite\\$\rangle$};
+  % cases 2x2
+  \draw[rounded corners=3pt] (158,365) rectangle (635,677);
+  \draw[rounded corners=3pt] (645,365) rectangle (1122,677);
+  \draw[rounded corners=3pt] (158,9) rectangle (635,355);
+  \draw[rounded corners=3pt] (645,9) rectangle (1122,355);
+  \node at (300,620) {case 0}; \node at (985,620) {case 1};
+  \node at (300,60) {case 2}; \node at (985,60) {case 3};
+  % zone morte 30% x 40%
+  \fill[black!6, draw=black!40] (640,360) ellipse (192 and 144);
+  \node[align=center] at (640,360) {zone morte\\$30\,\% \times 40\,\%$};
+  % cotes
+  \draw[<->] (0,-30) -- (153,-30) node[midway, below] {$b$};
+  \draw[<->] (153,-30) -- (640,-30) node[midway, below] {$c_w$};
+  \draw[<->] (1310,0) -- (1310,360) node[midway, right] {$c_h$};
+\end{tikzpicture}
+\caption{Disposition en grille $2\times2$ avec les réglages de \fichier{config.yaml} (bandes de \qty{12}{\percent}, zone morte de $30 \times \qty{40}{\percent}$), pour une fenêtre $1280\times720$.}
+\label{fig:disposition}
+\end{figure}
+
+\subsection{Dimensions}
+
+\begin{align}
+  b &= \operatorname{round}\big(\code{largeur_bandes}/100 \cdot w\big) && \text{largeur d'une bande}\\
+  m &= \max\big(4, \operatorname{round}(\num{0.012}\min(w, h))\big) && \text{marge entre éléments}\\
+  e &= \max\big(28, \operatorname{round}(\num{0.06}\,h)\big) && \text{hauteur de l'en-tête}\\
+  c_w &= (w - 2b)/C, \qquad c_h = h/L && \text{taille d'une case}
+\end{align}
+La case $(r, c)$ occupe horizontalement $[b + c\,c_w,\ b + (c+1)\,c_w]$ et verticalement $[r\,c_h,\ (r+1)\,c_h]$, moins des demi-marges entre cases. La première ligne commence sous l'en-tête. Les valeurs \num{0.012}, \num{0.06} et les minimums en pixels (\empi) gardent des proportions constantes d'une résolution à l'autre, sans descendre sous des tailles lisibles.
+
+\subsection{Zone morte}
+
+La zone morte est un ovale centré en $(c_x, c_y) = (w/2, h/2)$, de demi-axes
+\begin{equation}
+  a = \frac{\code{largeur}}{200}\,w, \qquad b_z = \frac{\code{hauteur}}{200}\,h
+\end{equation}
+(les réglages sont des \emph{largeurs totales} en pourcentage). La moitié basse est une ellipse ; la moitié haute est une \emph{super-ellipse}, ou courbe de Lamé :
+\begin{equation}
+  \text{bas } (y \geq c_y) : \Big(\frac{x - c_x}{a}\Big)^2 + \Big(\frac{y - c_y}{b_z}\Big)^2 \leq 1,
+  \qquad
+  \text{haut } (y < c_y) : \Big|\frac{x - c_x}{a}\Big|^n + \Big|\frac{y - c_y}{b_z}\Big|^n \leq 1,
+\end{equation}
+avec $n = 2 + 8\,\code{aplatissement_haut}$. Pour $n = 2$, on retrouve l'ellipse ; plus $n$ augmente, plus la courbe se rapproche d'un rectangle. Avec un aplatissement de 1 ($n = 10$), le dessus est presque plat.
+
+\paragraph{Pourquoi aplatir le haut ?} En grille $2\times2$, l'ovale mord sur le bas des deux cases du haut. Un dessus plat libère de la hauteur utile pour leur contenu, tout en gardant la forme arrondie en bas, là où le regard \enquote{tombe} naturellement au repos.
+
+\paragraph{Pourquoi une zone morte ?} L'utilisateur doit pouvoir reposer son regard quelque part sans rien déclencher. Le centre de l'écran est l'endroit le plus confortable pour cela, et c'est aussi là que le regard revient spontanément entre deux sélections. Elle sert également de tampon entre les cases, où l'erreur du tracker ferait hésiter entre deux cibles voisines.
+
+Le dessin de la zone morte ajoute autour d'elle un liseré de la couleur du fond, de largeur $m$, qui la sépare visuellement des cartes. La détection, elle, utilise l'ovale exact.
+
+\subsection{\texorpdfstring{Détection : \code{zone_at}}{Détection : zone_at}}
+
+\code{zone_at(x, y)} renvoie, par ordre de priorité :
+\begin{enumerate}
+  \item \code{MORTE} si $(x, y)$ est dans la zone morte ;
+  \item \code{GAUCHE} si $x < b$, \code{DROITE} si $x \geq w - b$ ;
+  \item sinon l'indice de case $r\,C + c$, avec $c = \operatorname{clip}(\lfloor (x - b)/c_w \rfloor, 0, C - 1)$ et $r = \operatorname{clip}(\lfloor y/c_h \rfloor, 0, L - 1)$.
+\end{enumerate}
+Les indices sont bornés pour qu'un regard légèrement hors fenêtre vise la case du bord, plutôt que rien. L'en-tête n'est pas exclu : le regarder vise la case de la première ligne qui se trouve en dessous.
+
+\subsection{Portion visible d'une carte}
+
+Pour centrer le texte d'une carte là où il ne sera pas masqué par l'ovale, \code{_segment_visible} calcule le plus grand intervalle vertical libre sur l'axe central de la carte, d'abscisse $x_c$. Avec $\tilde a = a + m$, $\tilde b = b_z + m$ et $u = |x_c - c_x| / \tilde a$ :
+\begin{itemize}
+  \item si $u \geq 1$, l'axe ne coupe pas l'ovale et la carte entière est libre ;
+  \item sinon, l'ovale couvre $[y_\text{haut}, y_\text{bas}]$ avec
+  \begin{equation}
+    y_\text{haut} = c_y - \tilde b\,(1 - u^n)^{1/n}, \qquad y_\text{bas} = c_y + \tilde b\sqrt{1 - u^2},
+  \end{equation}
+  et on garde le plus long des deux morceaux $[y_0, \min(y_1, y_\text{haut})]$ et $[\max(y_0, y_\text{bas}), y_1]$.
+\end{itemize}
+
+\section{Une itération de la boucle principale}
+
+\begin{enumerate}
+  \item \textbf{Horloge.} $dt \leftarrow$ \code{horloge.tick(images_par_seconde)}/1000, qui attend le temps nécessaire pour tenir la cadence ; $\text{now} \leftarrow$ \code{time.monotonic()}.
+  \item \textbf{Évènements.} Fermeture ; redimensionnement (hors plein écran : reconstruction du rendu) ; touches (tableau~\ref{tab:touches}).
+  \item \textbf{Commandes du thread actions.} On vide \code{vers_interface} : \code{message} affiche une bulle ; \code{calibrer} lance la calibration ; \code{ouvrir}, \code{retour} et \code{accueil} modifient la pile, puis \code{selecteur.bloquer()}.
+  \item \textbf{Calibration.} Si le tracker calibre, on dessine l'écran de calibration et la consigne, on remet le sélecteur à zéro et on passe à l'itération suivante. À la sortie de la calibration, une bulle indique \enquote{Calibration terminée} ou \enquote{Calibration annulée}.
+  \item \textbf{Regard.} En mode souris, on met à jour la position de la souris. $\text{ok} \leftarrow$ \code{gaze_fresh(delai_perte_regard)} ; $g_x = \operatorname{clip}(\text{gaze}_x, 0, 1)\,(w-1)$, et de même pour $g_y$.
+  \item \textbf{Curseur affiché.} Lissage exponentiel indépendant de la cadence :
+  \begin{equation}
+    k \leftarrow 1 - e^{-dt/\tau_c},\qquad \vect{c} \leftarrow \vect{c} + k\,(\vect{g} - \vect{c}), \qquad \tau_c = \qty{50}{\milli\second}.
+  \end{equation}
+  La forme $1 - e^{-dt/\tau}$ donne la même dynamique quelle que soit la cadence de la boucle. L'écran (30 à 60 Hz) se rafraîchit au moins aussi vite que la caméra (30 Hz) : sans ce lissage, le curseur avancerait par sauts d'une image caméra. $\tau_c = \qty{50}{\milli\second}$ (\empi) est d'un ordre comparable à la période caméra (\qty{33}{\milli\second}) : les sauts sont adoucis sans retard perceptible.
+  \item \textbf{Cible et durée}, calculées sur le regard \emph{brut} $\vect{g}$ et non sur le curseur lissé :
+  \begin{itemize}
+    \item bande : $D = \code{duree_clic}$ s'il y a plus d'une page, sinon \code{None} ;
+    \item case avec un bouton : $D$ = durée du bouton, ou réglage global ; l'anneau prend la couleur du bouton ;
+    \item zone morte, case vide ou regard perdu : \code{None}.
+  \end{itemize}
+  \item \textbf{Clic.} Si \code{selecteur.update} renvoie vrai : effet \enquote{pop} à la position du regard. Pour une bande : \code{defiler} et animation de glissement. Pour un bouton : point de recalibration (chapitre~\ref{chap:recal}), puis \code{executeur.lancer(etapes)} ; si le bouton ne navigue pas, une bulle affiche son texte ; avec \code{retour_apres_action} dans un sous-menu, une séquence \code{accueil} est mise en file \emph{après} celle du bouton. Le thread des actions traitant les séquences dans l'ordre, le retour à l'accueil a lieu une fois l'action terminée.
+  \item \textbf{Dessin} (chapitre~\ref{chap:rendu}), avec le statut \enquote{Non calibré · touche C} tant qu'il n'y a pas de modèle.
+\end{enumerate}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Touche & Effet \\
+\midrule
+C & lancer la calibration \\
+Échap & annuler la calibration en cours, sinon quitter \\
+Espace & recentrer sur le centre de la fenêtre \\
+R & oublier la calibration \\
+D & afficher ou masquer la vignette caméra annotée \\
+F & basculer plein écran / fenêtre \\
+\bottomrule
+\end{tabular}
+\caption{Raccourcis clavier, destinés à l'aidant.}
+\label{tab:touches}
+\end{table}
+
+\section{Mode souris}
+
+\code{TrackerSouris} imite l'interface publique du tracker : il est toujours \enquote{calibré}, \code{gaze} est la position de la souris normalisée, et \code{gaze_fresh} vaut vrai tant que la souris est dans la fenêtre. Les commandes de calibration sont sans effet. Ce mode permet de concevoir et de tester une configuration (disposition, menus, actions) sur n'importe quel ordinateur, sans caméra ni MediaPipe.
+
+\section{Différences avec \texorpdfstring{\fichier{main.py}}{main.py}}
+
+\fichier{main.py} contient la même boucle, presque ligne pour ligne, mais avec le tracker v1. Il n'affiche pas la consigne de calibration de la v2, ne transmet pas les paramètres de recalibration et n'envoie pas de point de recalibration au clic. Les classes \code{Navigation}, \code{Selecteur} et \code{TrackerSouris} y sont dupliquées.

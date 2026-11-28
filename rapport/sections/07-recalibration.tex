@@ -1,0 +1,134 @@
+\chapter{Recalibration continue au clic}
+\label{chap:recal}
+
+Une calibration n'est jamais parfaite, et elle se dégrade avec le temps : l'utilisateur change de position, la lumière change, la webcam bouge. Chaque clic est une occasion de corriger le modèle, puisqu'on sait à peu près ce que l'utilisateur regardait juste avant de cliquer. C'était le premier point de la feuille de route (\enquote{recentrer à chaque clic en milieu de la cellule}), réalisé dans le commit \code{797601f}.
+
+\section{Côté interface : la cible du point}
+
+Quand un bouton est déclenché, \fichier{main_v2.py} ajoute un point de calibration si les quatre conditions suivantes sont réunies :
+\begin{itemize}
+  \item \code{recalibration_clic} est activé ;
+  \item on n'est pas en mode souris ;
+  \item le tracker est calibré ;
+  \item le clic porte sur une case : les bandes de défilement sont exclues, car elles n'ont pas de bouton dont on pourrait viser le centre.
+\end{itemize}
+La cible transmise est un mélange du centre de la case $\vect{c}$ et de la position du regard au moment du clic $\vect{g}$ (en pixels, puis normalisés par $(w-1, h-1)$) :
+\begin{equation}
+  \vect{y}^\star = \alpha\,\vect{c} + (1 - \alpha)\,\vect{g}, \qquad \alpha = \code{recalibration_part_centre}.
+\end{equation}
+
+\subsection{Interprétation de $\alpha$}
+
+Ce mélange est un estimateur \emph{à rétrécissement}. Supposons que l'utilisateur fixe un point $\vect{y}$ de la case, distribué autour du centre avec un écart-type $\sigma_U$ (on ne vise jamais exactement le centre d'un grand bouton), et que le regard mesuré soit $\vect{g} = \vect{y} + \vect\varepsilon$, où $\vect\varepsilon$ est l'erreur du modèle, d'écart-type $\sigma_\varepsilon$. Si ces deux lois sont gaussiennes et indépendantes, la meilleure estimation du point réellement fixé est
+\begin{equation}
+  \mathbb E[\vect{y} \mid \vect{g}] = \vect{c} + \frac{\sigma_U^2}{\sigma_U^2 + \sigma_\varepsilon^2}\,(\vect{g} - \vect{c})
+  \quad\Longleftrightarrow\quad
+  \alpha^\star = \frac{\sigma_\varepsilon^2}{\sigma_U^2 + \sigma_\varepsilon^2}.
+\end{equation}
+\begin{itemize}
+  \item $\alpha = 1$ revient à supposer que l'utilisateur vise toujours exactement le centre ($\sigma_U = 0$). Les points sont alors très informatifs mais biaisés, dès que l'utilisateur vise ailleurs (par exemple le texte du bouton, décentré si la zone morte masque le centre).
+  \item $\alpha = 0$ revient à croire le modèle ($\sigma_\varepsilon = 0$) : la cible vaut le regard prédit, et la recalibration ne corrige rien.
+  \item La valeur de \fichier{config.yaml}, $\alpha = \num{0.65}$, correspond à $\sigma_\varepsilon \approx 1.36\,\sigma_U$ : on estime l'erreur du modèle un peu supérieure à la dispersion de la visée dans la case. Le défaut de \fichier{config.py} est $\alpha = \num{0.5}$, soit $\sigma_\varepsilon = \sigma_U$.
+\end{itemize}
+Ces valeurs sont \empi : aucune mesure de $\sigma_U$ ni de $\sigma_\varepsilon$ n'a été faite. La formule indique comment les régler si l'on mesure un jour ces deux dispersions.
+
+\section{Côté tracker : constitution d'un point}
+
+\code{GazeTracker.add_calibration_point(cible, t)} met en file une commande qui, dans le thread tracker :
+\begin{enumerate}
+  \item vérifie qu'un modèle de base existe et qu'aucune calibration n'est en cours ;
+  \item sélectionne dans l'historique \code{_recent} les observations dont l'instant est dans $[t - \Delta, t]$, avec $\Delta = \code{recalibration_fenetre}$ ;
+  \item abandonne s'il y en a moins de 3 ;
+  \item empile ces observations et ajoute le couple $(\text{observations},\ \vect{y}^\star - \vect{o})$ à la fenêtre glissante \code{recal_points}, où $\vect{o}$ est le décalage de recentrage courant. Le modèle prédit le regard \emph{avant} ce décalage : il faut donc le retirer de la cible pour rester cohérent ;
+  \item réajuste la correction (\code{_refit_recal}).
+\end{enumerate}
+
+\paragraph{L'historique \code{_recent}.} Pendant le suivi, chaque image exploitable ajoute $(t, \text{obs}, b_v)$ à une file bornée à 300 éléments, soit environ \qty{10}{\second} à \qty{30}{images\per\second} (\empi, largement supérieur au besoin). Ce sont les observations géométriques complètes ($\vect{O}$, $R$, $\theta$, $\varphi$) et non les points prédits : on peut ainsi réévaluer le modèle avec d'autres paramètres.
+
+\begin{origine}
+\textbf{Fenêtre} $\Delta$ : \qty{0.4}{\second} dans \fichier{config.yaml}, \qty{0.5}{\second} par défaut dans \fichier{config.py} et \code{RECAL_WINDOW_S} (\empi). Le clic intervient après \code{duree_clic} $= \qty{2}{\second}$ de fixation. Les dernières \qty{0.4}{\second} sont donc prises au cœur de la fixation : loin de la saccade d'entrée dans la case, et assez récentes pour refléter la pose actuelle. Elles contiennent environ 12 images ; le minimum de \textbf{3 images} écarte les cas où le visage a été perdu juste avant le clic.
+\end{origine}
+
+\section{Ajustement de la correction}
+
+\subsection{Paramètres corrigés}
+
+Seuls quatre des 23 paramètres sont modifiés (\code{RECAL_PARAMS = [6, 13, 7, 15]}) :
+\begin{center}
+\begin{tabular}{@{}cll@{}}
+\toprule
+Indice & Paramètre & Effet \\
+\midrule
+6 & constante de $\theta$ & décalage horizontal de l'axe visuel (kappa) \\
+13 & constante de $\varphi$ & décalage vertical de l'axe visuel \\
+7 & coefficient de $\theta$ dans la correction de $\theta$ & gain horizontal de l'œil \\
+15 & coefficient de $\varphi$ dans la correction de $\varphi$ & gain vertical de l'œil \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Pourquoi corriger les angles et pas l'écran ?} Un simple décalage du curseur à l'écran (comme celui du recentrage, ou le terme constant de l'affine) n'est juste qu'\emph{à la pose actuelle}. Une erreur d'angle de \ang{1} produit à l'écran un décalage proportionnel à la distance de la tête, et dont la direction suit la rotation de la tête. En corrigeant l'erreur \emph{là où elle naît}, dans les angles œil/tête, la correction reste valable quand l'utilisateur bouge. Se limiter à quatre paramètres, les mieux déterminés par quelques points, évite de sur-ajuster des clics bruités.
+
+\subsection{Coût}
+
+On note $\vect{p}^\text{base}$ les paramètres de la calibration et $\vect\delta \in \R^4$ la correction, de sorte que $\vect{p} = \vect{p}^\text{base} + E\vect\delta$, où $E$ place $\vect\delta$ aux indices ci-dessus. Pour une fenêtre de $K$ points, numérotés du plus ancien ($k = 0$) au plus récent ($k = K-1$), le point $k$ ayant $n_k$ images :
+\begin{equation}
+  J(\vect\delta) = \sum_{k=0}^{K-1} \sum_{i=1}^{n_k} \frac{W\,d^{\,K-1-k}}{n_k}
+   \sum_{c\in\{x,y\}} \rho\!\left(\frac{\hat y_{kic}(\vect{p}^\text{base} + E\vect\delta) - y^\star_{kc}}{\sigma_\text{fit}}\right)
+   + \sum_{m=1}^{4}\left(\frac{\delta_m}{s_m}\right)^2,
+\end{equation}
+avec $W = \code{recalibration_poids}$, $d = \code{recalibration_oubli}$ et $\vect{s} = \code{RECAL_SIGMA} = (\num{0.15}, \num{0.15}, \num{0.2}, \num{0.2})$. On réutilise la même perte soft-L1 $\rho$ et le même $\sigma_\text{fit}$ qu'à la calibration.
+
+\begin{itemize}
+  \item \textbf{Chaque point pèse au total $W d^{\,\text{âge}}$}, quel que soit son nombre d'images, grâce à la division par $n_k$.
+  \item \textbf{La calibration reste l'ancre.} Ses échantillons ne sont pas réutilisés ; c'est l'a priori $\delta_m / s_m$ qui ramène la correction vers 0, c'est-à-dire vers le modèle de base. Les écarts-types reprennent ceux de la calibration : \qty{0.15}{\radian} pour les décalages, \num{0.2} pour les gains, un peu plus serré que les \numrange{0.5}{0.6} de la calibration parce qu'on corrige ici un modèle \emph{déjà} ajusté.
+  \item \textbf{Optimisation} : Levenberg-Marquardt, 15 itérations au plus, en partant de la correction précédente (démarrage à chaud). Les corrections successives restent ainsi continues et le calcul est rapide : la docstring parle de \enquote{quelques ms}. Le nouveau modèle est $\vect{p}^\text{base} + E\vect\delta$.
+\end{itemize}
+
+\subsection{Mémoire et oubli}
+
+La somme des poids d'une longue suite de clics est $W\sum_k d^k \to W/(1-d)$ : la fenêtre se comporte comme une moyenne exponentielle sur un \emph{nombre effectif} de clics $1/(1-d)$. La \emph{demi-vie}, nombre de clics après lequel un point ne pèse plus que la moitié, vaut $\ln\frac12 / \ln d$.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+$d$ & Nombre effectif $1/(1-d)$ & Demi-vie (clics) & Poids du 20\textsuperscript{e} point $d^{19}$ & Source \\
+\midrule
+\num{0.80} & \num{5.0} & \num{3.1} & \num{0.014} & \code{RECAL_DECAY}, \fichier{config.py} \\
+\num{0.85} & \num{6.7} & \num{4.3} & \num{0.046} & \fichier{config.yaml} \\
+\bottomrule
+\end{tabular}
+\caption{Effet du facteur d'oubli.}
+\end{table}
+
+Avec ces valeurs, les points au-delà du vingtième pèseraient moins de \qty{5}{\percent} : la fenêtre de 20 points (\code{recalibration_points_max}) borne le coût de calcul sans changer le résultat de façon perceptible.
+
+\subsection{Force d'une correction}
+
+Pour sentir l'équilibre entre données et a priori, on prend un cas simple : un décalage horizontal d'angle $\delta$, qui produit à l'écran un décalage $\gamma\delta$. À \qty{60}{\centi\metre} de distance, \ang{1} ($\qty{0.0175}{\radian}$) donne environ \qty{1.05}{\centi\metre}, soit \qty{3.5}{\percent} d'un écran de \qty{30}{\centi\metre} de large : $\gamma \approx 2$ (fraction d'écran par radian). Dans le régime quadratique, avec un seul point de poids $W = 1$ et une erreur $e$, minimiser $(e - \gamma\delta)^2/\sigma_\text{fit}^2 + \delta^2/s^2$ donne une fraction corrigée de
+\begin{equation}
+  \frac{\gamma\delta^\star}{e} = \frac{\gamma^2/\sigma_\text{fit}^2}{\gamma^2/\sigma_\text{fit}^2 + 1/s^2}
+  = \frac{4/\num{0.0009}}{4/\num{0.0009} + 1/\num{0.0225}} \approx \num{0.99} .
+\end{equation}
+\emph{Un seul clic corrige donc presque entièrement un décalage}. La recalibration est très réactive. Le revers est que le bruit de visée d'un clic passe lui aussi presque entièrement dans la correction. Ce sont le mélange avec le centre ($\alpha$) et la moyenne sur plusieurs clics ($d$) qui filtrent ce bruit. Pour une recalibration plus prudente, il faut baisser \code{recalibration_poids}.
+
+\section{Remise à zéro}
+
+\code{_clear_recal} vide les points, l'historique et la correction, et restaure le modèle de base. Elle est appelée après chaque nouvelle calibration (touche C), au reset (touche R, qui efface aussi le modèle de base) et au chargement d'une calibration.
+
+\section{Sauvegarde et chargement d'une calibration}
+
+\code{save_calibration(path)} écrit un fichier \code{.npz} NumPy contenant :
+\begin{itemize}
+  \item \code{pts} : la forme 3D rigide (69 points, cm, repère tête) ;
+  \item \code{eyes} : les deux centres de globe ;
+  \item \code{f_ratio} : $f/w$, pour retrouver la focale à une autre résolution ;
+  \item \code{params} : les 23 paramètres du \emph{modèle de base}. Les corrections de recalibration, liées à une session, ne sont pas sauvegardées.
+\end{itemize}
+
+\code{load_calibration(path)} reconstruit la caméra si aucune image n'a encore été lue, à partir de la résolution demandée à OpenCV, puis le modèle de tête et le modèle de regard. Elle remet aussi à zéro la recalibration, le décalage et les filtres.
+
+\begin{attention}
+Ces deux méthodes existent mais \textbf{ne sont appelées nulle part} : il faut recalibrer à chaque lancement. Les brancher au démarrage et en fin de calibration fait partie de la feuille de route. Une calibration rechargée suppose la même webcam, à la même place, et le même utilisateur ; la recalibration au clic corrige ensuite les petits écarts.
+\end{attention}

@@ -1,0 +1,219 @@
+\chapter{Architecture et pipeline}
+\label{chap:archi}
+
+\section{Organisation des fichiers}
+
+Le code utilisé par l'interface se trouve dans \fichier{victor/}. Le point d'entrée actuel est \fichier{victor/main_v2.py}.
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l L l@{}}
+\toprule
+Fichier & Rôle & Lignes \\
+\midrule
+\fichier{main_v2.py} & Boucle principale avec le tracker v2 : navigation, sélection par fixation, recalibration au clic & 298 \\
+\fichier{main.py} & Même boucle avec le tracker v1 & 278 \\
+\fichier{utils_v2.py} & Tracker v2 : caméra, modèle de tête, modèle de regard géométrique, calibration 3D, recalibration & 832 \\
+\fichier{utils.py} & Tracker v1 et briques partagées (indices, One Euro, features, téléchargement du modèle) & 612 \\
+\fichier{interface.py} & Disposition de l'écran (géométrie des zones) et rendu pygame & 503 \\
+\fichier{config.py} & Lecture, fusion et validation de la configuration & 332 \\
+\fichier{actions.py} & Registre, analyse et exécution des actions ; clavier, GPIO, HTTP & 423 \\
+\fichier{config.yaml} & Configuration par défaut, documentée en commentaires & 140 \\
+\bottomrule
+\end{tabularx}
+\caption{Modules du dossier \fichier{victor/}.}
+\end{table}
+
+Les dépendances entre modules sont volontairement à sens unique : \fichier{main_v2.py} utilise tous les autres ; \fichier{utils_v2.py} réutilise \fichier{utils.py} ; \fichier{config.py} utilise \fichier{actions.py} pour valider les actions au chargement. \fichier{interface.py} ne connaît ni le tracker ni les actions : il reçoit à chaque image ce qu'il doit dessiner.
+
+\section{Modèle d'exécution : trois threads}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance=6mm and 8mm, font=\small,
+  boite/.style={draw, rounded corners=3pt, align=center, minimum height=9mm, minimum width=27mm, inner sep=3pt, fill=white},
+  groupe/.style={draw=doux, dashed, rounded corners=6pt, inner sep=6pt},
+  fl/.style={-{Stealth[length=2.2mm]}, thick},
+  lab/.style={font=\scriptsize, align=center, fill=white, inner sep=1pt}]
+  % Thread tracker
+  \node[boite] (cam) {Webcam\\\code{cap.read}};
+  \node[boite, below=of cam] (mp) {MediaPipe\\478 landmarks};
+  \node[boite, below=of mp] (mod) {Modèle de regard\\v1 ou v2};
+  \node[boite, below=of mod] (oe) {Filtre One Euro};
+  \draw[fl] (cam) -- (mp); \draw[fl] (mp) -- (mod); \draw[fl] (mod) -- (oe);
+  % Thread principal
+  \node[boite, right=24mm of cam] (boucle) {Boucle \code{main}};
+  \node[boite, below=of boucle] (zone) {Zone visée\\\code{zone_at}};
+  \node[boite, below=of zone] (sel) {\code{Selecteur}\\chrono de fixation};
+  \node[boite, below=of sel] (rendu) {Rendu pygame};
+  \draw[fl] (boucle) -- (zone); \draw[fl] (zone) -- (sel); \draw[fl] (sel) -- (rendu);
+  % Thread actions
+  \node[boite, right=24mm of sel] (exe) {\code{Executeur}};
+  \node[boite, below=of exe] (out) {Clavier, programme,\\GPIO, HTTP};
+  \draw[fl] (exe) -- (out);
+  \begin{scope}[on background layer]
+    \node[groupe, fit=(cam)(oe), label={[font=\small\bfseries]above:Thread \code{gaze-tracker}}] {};
+    \node[groupe, fit=(boucle)(rendu), label={[font=\small\bfseries]above:Thread principal}] {};
+    \node[groupe, fit=(exe)(out), label={[font=\small\bfseries]above:Thread \code{actions}}] {};
+  \end{scope}
+  % Échanges
+  \draw[fl, accent] (oe.east) -- ++(6mm,0) |- node[lab, pos=0.75, above] {\code{gaze}} (zone.west);
+  \draw[fl, accent, dashed] (boucle.west) -- node[lab, above] {\code{_cmds}} (cam.east);
+  \draw[fl, accent] (sel.east) -- node[lab, above] {\code{lancer}} (exe.west);
+  \draw[fl, accent, dashed] (exe.north) |- node[lab, pos=0.75, above] {\code{vers_interface}} (boucle.east);
+\end{tikzpicture}
+\caption{Les trois threads et leurs échanges. Traits pleins : valeur lue directement (\code{tracker.gaze}, \code{last_valid}) ou appel de méthode. Tirets : files \code{queue.Queue}.}
+\label{fig:threads}
+\end{figure}
+
+\subsection{Thread du tracker}
+
+\code{GazeTracker.start()} lance un thread démon nommé \code{gaze-tracker}, qui appelle \code{step()} en boucle jusqu'à ce que l'évènement \code{_stop} soit levé ou que la caméra cesse de répondre ; \code{alive} passe alors à \code{False}, ce qui arrête aussi la boucle principale. Le rythme est imposé par \code{cap.read()}, qui bloque jusqu'à l'image suivante. Le tracker tourne donc à la cadence de la caméra, ou moins vite si MediaPipe ne suit pas.
+
+Un appel à \code{step()} :
+\begin{enumerate}
+  \item exécute toutes les commandes en attente dans \code{_cmds} (section~\ref{sec:commandes}) ;
+  \item lit une image, la retourne en miroir et la convertit en RGB ;
+  \item calcule un horodatage strictement croissant et met à jour la mesure de cadence (\code{fps}) ;
+  \item appelle MediaPipe, extrait les mesures et teste les clignements ;
+  \item pendant une calibration, transmet l'échantillon à la calibration ; sinon, calcule et filtre le point regardé ;
+  \item publie \code{frame}, \code{frame_id}, \code{usable} et, si la mesure est exploitable, \code{gaze} et \code{last_valid}.
+\end{enumerate}
+
+\subsection{Thread principal}
+
+Il exécute la boucle de \code{main()} (chapitre~\ref{chap:interaction}) à la cadence \code{images_par_seconde} (\num{30} par défaut), imposée par \code{pygame.time.Clock.tick}. Il lit \code{tracker.gaze} \emph{sans attendre} le tracker : l'interface reste fluide même si le tracker ralentit, et inversement.
+
+\subsection{Thread des actions}
+
+\code{actions.Executeur} crée un thread démon \code{actions} qui exécute les séquences d'actions des boutons, une à la fois, dans l'ordre d'arrivée (chapitre~\ref{chap:actions}). Une action lente (\code{attendre 1.5}, une requête HTTP qui met \qty{3}{\second} à échouer) ne fige donc jamais l'interface.
+
+\subsection{Communication et absence de verrous}
+\label{sec:commandes}
+
+Le code n'utilise aucun verrou entre ces trois threads. La cohérence repose sur trois règles :
+
+\begin{enumerate}
+  \item \textbf{Publication par remplacement.} Le tracker publie le regard en \emph{remplaçant} l'attribut par un nouveau tableau (\code{self.gaze = np.array([...])}), sans jamais le modifier sur place. En CPython, l'affectation d'un attribut est atomique : le lecteur voit soit l'ancien tableau, soit le nouveau, jamais un mélange des deux. Même principe pour \code{last_valid} (un flottant) et \code{frame}.
+  \item \textbf{Commandes sérialisées.} Toutes les méthodes publiques qui modifient l'état du tracker (\code{start_calibration}, \code{cancel_calibration}, \code{recenter}, \code{reset}, \code{add_calibration_point}, \code{save_calibration}, \code{load_calibration}) ne font que déposer une fermeture dans la file \code{_cmds}. Le thread tracker les exécute au début de l'image suivante, donc au plus une période caméra (\qty{\approx 33}{\milli\second}) plus tard. L'état interne (modèle, filtres, calibration) n'est ainsi modifié que par un seul thread.
+  \item \textbf{Files dans les deux sens pour les actions.} \code{Executeur._travaux} (thread principal $\to$ actions) et \code{Executeur.vers_interface} (actions $\to$ thread principal) sont des \code{queue.Queue}, sûres entre threads.
+\end{enumerate}
+
+\begin{attention}
+\code{add_calibration_point(cible, t)} reçoit l'instant \code{t} du clic \emph{au moment de l'appel}, et non à l'exécution de la commande. Les images retenues sont donc bien celles qui précèdent le clic, même si la commande s'exécute une image plus tard.
+\end{attention}
+
+\paragraph{Parallélisme réel.} Python a un verrou global (GIL), mais le travail lourd se fait dans du code natif (inférence MediaPipe en C++, OpenCV, algèbre linéaire NumPy) qui peut en général relâcher ce verrou. La séparation en threads sert surtout à \emph{découpler les cadences} : la caméra et le rendu tournent chacun à leur rythme, et aucune attente d'un côté ne bloque l'autre.
+
+\section{Pipeline d'une image}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance=4.5mm, font=\small,
+  etape/.style={draw, rounded corners=3pt, align=center, minimum width=62mm, minimum height=8mm, fill=white, inner sep=3pt},
+  test/.style={draw, diamond, aspect=2.6, align=center, inner sep=1pt, font=\scriptsize},
+  rejet/.style={draw=orange!70!black, rounded corners=3pt, align=center, fill=orange!8, font=\scriptsize, inner sep=3pt},
+  fl/.style={-{Stealth[length=2mm]}, thick}]
+  \node[etape] (a) {\code{cap.read()} : image BGR $640\times480$};
+  \node[etape, below=of a] (b) {\code{cv2.flip} miroir, conversion RGB, horodatage};
+  \node[etape, below=of b] (c) {MediaPipe \code{detect_for_video}\\landmarks, blendshapes, matrice de pose};
+  \node[etape, below=of c] (d) {\code{extract_features} : 10 features v1, score de clignement};
+  \node[etape, below=of d] (e) {\code{HeadModel.observe} : pose $(R, \vect{O})$, angles $(\theta, \varphi)$};
+  \node[etape, below=of e] (f) {Test de clignement (seuil \num{0.6}, maintien \qty{150}{\milli\second})};
+  \node[etape, below=of f] (g) {\code{GeoGazeModel.predict} : point $(x, y)$ brut};
+  \node[etape, below=of g] (h) {$+$ décalage de recentrage, filtre One Euro};
+  \node[etape, below=of h, fill=accent!10] (i) {Publication : \code{gaze}, \code{last_valid}};
+  \foreach \u/\v in {a/b,b/c,c/d,d/e,e/f,f/g,g/h,h/i} \draw[fl] (\u) -- (\v);
+  \node[rejet, right=10mm of c] (r1) {pas de visage\\$\Rightarrow$ image ignorée};
+  \node[rejet, right=10mm of e] (r2) {$|\text{yaw}|$ ou $|\text{pitch}| > \ang{50}$\\$\Rightarrow$ image ignorée};
+  \node[rejet, right=10mm of f] (r3) {clignement\\$\Rightarrow$ image ignorée};
+  \draw[fl, orange!70!black] (c) -- (r1); \draw[fl, orange!70!black] (e) -- (r2); \draw[fl, orange!70!black] (f) -- (r3);
+  \node[etape, left=10mm of g, minimum width=30mm, fill=black!4] (cal) {Pendant la calibration :\\landmarks bruts\\$\to$ \code{Calibration3D}};
+  \draw[fl, dashed] (f.west) -| (cal.north);
+\end{tikzpicture}
+\caption{Traitement d'une image par le tracker v2 (thread \code{gaze-tracker}). Une image ignorée ne modifie pas \code{gaze}.}
+\label{fig:pipeline}
+\end{figure}
+
+Dans le thread principal, à chaque tour :
+\begin{enumerate}
+  \item \code{tracker.gaze} est borné à $[0, 1]^2$ puis converti en pixels ;
+  \item la zone visée est déterminée sur le regard \emph{brut}, et le curseur affiché est lissé à part ;
+  \item le chrono de fixation avance ou repart à zéro ; en cas de clic, l'action est envoyée au thread des actions ;
+  \item seuls les rectangles modifiés de l'écran sont redessinés.
+\end{enumerate}
+
+\section{Objectifs de performance}
+\label{sec:perf}
+
+\subsection{Ce que le code fixe explicitement}
+
+Le dépôt ne contient pas de banc de mesure. Les objectifs se lisent dans les constantes et les commentaires du code :
+
+\begin{itemize}
+  \item \textbf{Cadence caméra} : \code{CAM_FPS = 30}, résolution $640\times480$. Le commentaire de \fichier{utils.py} justifie cette résolution par son coût : elle est \enquote{bien moins coûteuse sur Raspberry Pi}. Le coût de MediaPipe croît avec la surface de l'image ; or l'iris occupe déjà une dizaine de pixels de diamètre à \qty{60}{\centi\metre} en $640\times480$, ce qui suffit au réseau.
+  \item \textbf{Latence de capture minimale} : \code{CAP_PROP_BUFFERSIZE = 1}. Par défaut, le pilote V4L2 garde plusieurs images en file ; si le traitement est plus lent que la caméra, on lirait des images de plus en plus anciennes. Avec une file d'une seule image, \code{read()} renvoie toujours la plus récente disponible.
+  \item \textbf{Cadence d'affichage} : \code{images_par_seconde = 30} (bornes \numrange{5}{120}).
+  \item \textbf{Rendu incrémental} : les commentaires d'\fichier{interface.py} indiquent que tout est \enquote{pensé pour un Raspberry Pi} (chapitre~\ref{chap:rendu}).
+  \item \textbf{Ajustement de calibration supportable} : le tracker v2 chronomètre l'ajustement et affiche sa durée dans la console (\code{ajustement x.xs}).
+\end{itemize}
+
+\subsection{Budget de latence}
+
+Le temps entre le moment où l'œil se pose sur un bouton et le déclenchement de l'action est la somme de plusieurs termes :
+
+\begin{equation}
+T_\text{clic} \approx \underbrace{T_\text{saccade}}_{\approx\,\qty{0.2}{\second}}
+ + \underbrace{T_\text{capture} + T_\text{MediaPipe} + T_\text{calcul}}_{\text{latence du tracker}}
+ + \underbrace{T_\text{filtre}}_{\text{One Euro}}
+ + \underbrace{T_\text{boucle}}_{\leq\,\qty{33}{\milli\second}}
+ + \underbrace{T_\text{fixation}}_{\code{duree_clic} = \qty{2}{\second}} .
+\end{equation}
+
+\begin{itemize}
+  \item $T_\text{saccade}$ : temps de réaction d'une saccade visuelle, environ \qtyrange{150}{250}{\milli\second}, auquel s'ajoute sa durée (quelques dizaines de millisecondes).
+  \item $T_\text{capture}$ : au plus une période caméra, \qty{33}{\milli\second}, grâce à la file d'une image.
+  \item $T_\text{MediaPipe}$ : non mesuré dans le dépôt. Il est visible en direct : la vignette de debug (touche D) affiche les images par seconde du tracker (moyenne exponentielle $\text{fps} \leftarrow 0.9\,\text{fps} + 0.1/\Delta t$, soit une fenêtre effective d'une dizaine d'images).
+  \item $T_\text{calcul}$ : négligeable devant MediaPipe. Le tracker v2 fait trois alignements de Procrustes sur 69 points (trois SVD $3\times3$) et quelques produits matrice-vecteur.
+  \item $T_\text{filtre}$ : au repos, le filtre One Euro a une constante de temps $\tau = 1/(2\pi\cdot\num{0.6}) \approx \qty{0.27}{\second}$. Pendant une saccade, la fréquence de coupure monte et ce retard diminue fortement (section~\ref{sec:oneeuro}).
+  \item $T_\text{fixation}$ domine volontairement : c'est la garantie contre les clics involontaires.
+\end{itemize}
+
+Le chrono de fixation démarre dès que le regard \emph{brut} entre dans la case. Le lissage d'affichage du curseur (\qty{50}{\milli\second}) n'ajoute donc rien à $T_\text{clic}$.
+
+\subsection{Coût de la calibration v2}
+
+L'ajustement final est le seul calcul lourd. On peut l'estimer :
+\begin{itemize}
+  \item nombre d'échantillons $N \leq 16 \times 60 + 3 \times 135 = \num{1365}$ (\qty{2}{\second} et \qty{4.5}{\second} de collecte à \qty{30}{images\per\second}), moins les images perdues ;
+  \item vecteur de résidus de taille $2N + 21$ (deux coordonnées par échantillon, plus 21 termes d'a priori) ;
+  \item par itération de Levenberg-Marquardt, $23 + 1 = 24$ évaluations du modèle pour la jacobienne par différences finies, plus une évaluation par essai de pas ;
+  \item 60 itérations au plus pour l'ajustement principal, puis $16 \times 3$ itérations pour la validation croisée.
+\end{itemize}
+Cela fait quelques milliers d'évaluations vectorisées sur $\sim\num{1000}$ échantillons, et la résolution de systèmes $23\times23$. L'ensemble se compte en secondes sur un PC ; la durée réelle est affichée à chaque calibration. L'ajustement s'exécute dans le thread tracker, qui ne publie plus de regard pendant ce temps, mais l'interface continue d'être dessinée.
+
+\subsection{Objectifs proposés}
+
+Pour transformer ces intentions en critères vérifiables, le tableau~\ref{tab:objectifs} propose des objectifs. Ce sont des \emph{propositions} : elles ne sont pas encore mesurées.
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l L@{}}
+\toprule
+Grandeur & Objectif & Comment la mesurer \\
+\midrule
+Cadence du tracker (PC) & \qty{30}{images\per\second} & champ \code{fps} affiché en mode debug \\
+Cadence du tracker (Pi) & $\geq$ \qty{15}{images\per\second} & idem, sur la cible \\
+Cadence de l'interface & \qty{30}{images\per\second} stables & \code{horloge.get_fps()} de pygame \\
+Erreur validée (LOPO) & $<$ \qty{5}{\percent} en $x$ et $y$ & affichée en fin de calibration \\
+Erreur tête en mouvement & $<$ \qty{8}{\percent} & affichée en fin de calibration (v2) \\
+Durée d'ajustement & $<$ \qty{5}{\second} sur Pi & affichée en fin de calibration (v2) \\
+\bottomrule
+\end{tabularx}
+\caption{Objectifs de performance proposés (non mesurés à ce jour).}
+\label{tab:objectifs}
+\end{table}
+
+Ces seuils viennent de la taille des cibles. En grille $2\times2$ avec des bandes latérales de \qty{12}{\percent}, une case fait environ \qty{38}{\percent} de la largeur et \qty{50}{\percent} de la hauteur de l'écran. Une erreur de \qty{5}{\percent} laisse une marge confortable autour du centre d'une case, même en tenant compte de la zone morte.

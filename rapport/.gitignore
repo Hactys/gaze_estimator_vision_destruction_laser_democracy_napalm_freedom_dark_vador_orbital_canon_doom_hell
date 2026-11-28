@@ -1,0 +1,25 @@
+# Dossier de sortie de latexmk (-outdir=build)
+build/
+build.log
+
+# Fichiers auxiliaires LaTeX (où qu'ils soient : rapport/ ou rapport/sections/)
+*.aux
+*.toc
+*.lof
+*.lot
+*.out
+*.log
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+*.nav
+*.snm
+*.xdv
+
+# PDF générés (le document se recompile à partir des sources)
+# *.pdf

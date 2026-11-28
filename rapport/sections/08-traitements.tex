@@ -1,0 +1,92 @@
+\chapter{Traitements communs du signal de regard}
+\label{chap:traitements}
+
+Les mécanismes de ce chapitre sont identiques dans les deux trackers (méthode \code{step()}). Ils transforment une suite de mesures brutes, bruitées et parfois absentes, en un signal de regard exploitable par l'interface.
+
+\section{Clignements}
+\label{sec:clignements}
+
+Pendant un clignement, la paupière masque l'iris et MediaPipe place le centre de l'iris trop bas. Sans traitement, chaque clignement ferait plonger le curseur vers le bas de l'écran, puis le ferait remonter.
+
+\paragraph{Règle.} Une image est déclarée \enquote{clignement} si $s_\text{blink} > \code{seuil_clignement}$ (\num{0.6} par défaut). On mémorise alors $t_\text{fin} = t + \qty{0.15}{\second}$ (\code{BLINK_HOLD_S}), et une image n'est exploitable que si elle n'est pas un clignement \emph{et} si $t \geq t_\text{fin}$. Les images non exploitables ne modifient ni le regard publié, ni les filtres, ni l'historique ; pendant une calibration, elles ne sont pas collectées.
+
+\begin{origine}
+\textbf{Seuil \num{0.6}} (\empi, réglable de 0 à 1) : le score \code{eyeBlink} est proche de 0 œil grand ouvert et proche de 1 œil fermé, mais il monte aussi quand on regarde vers le bas, parce que la paupière s'abaisse. Un seuil au-dessus de la moitié évite de jeter les regards vers le bas de l'écran, tout en détectant les vrais clignements. Ces valeurs typiques ne sont pas mesurées dans le dépôt. On peut le baisser pour une personne aux paupières tombantes, ou s'il reste des sauts du curseur.
+
+\textbf{Maintien \qty{0.15}{\second}} (\litt{} / \empi) : un clignement dure de l'ordre de \qtyrange{100}{400}{\milli\second}, et la réouverture de la paupière est nettement plus lente que la fermeture. Pendant cette réouverture, le score repasse sous le seuil alors que l'iris est encore partiellement couvert. \qty{150}{\milli\second}, soit environ 5 images, couvrent cette phase.
+\end{origine}
+
+\section{Filtre One Euro}
+\label{sec:oneeuro}
+
+\subsection{Le compromis à résoudre}
+
+Le regard brut est bruité : le centre de l'iris est localisé à environ un pixel près, ce qui fait trembler le curseur de quelques pour cent de l'écran en fixation. Un filtre passe-bas fort supprime ce tremblement, mais retarde le curseur lors des saccades. Un filtre faible est réactif, mais tremble. Le filtre One Euro \cite{casiez2012} résout ce compromis en \emph{adaptant} la fréquence de coupure à la vitesse : forte stabilité à l'arrêt, faible retard en mouvement.
+
+\subsection{Dérivation}
+
+Un filtre passe-bas du premier ordre (circuit RC) de constante de temps $\tau = 1/(2\pi f_c)$ obéit à $\tau\,\dot{\hat x} = x - \hat x$. Discrétisé avec une période $T_e$ (schéma implicite), il donne
+\begin{equation}
+  \hat x_t = \hat x_{t-1} + \frac{T_e}{\tau + T_e}(x_t - \hat x_{t-1}) = \alpha\,x_t + (1 - \alpha)\,\hat x_{t-1},
+  \qquad \alpha(T_e, f_c) = \frac{1}{1 + \tau/T_e} .
+\end{equation}
+Le filtre One Euro applique ce lissage avec une coupure qui dépend de la vitesse estimée :
+\begin{align}
+  \dot x_t &= (x_t - \hat x_{t-1})/T_e && \text{vitesse brute} \\
+  \hat{\dot x}_t &= \alpha(T_e, f_d)\,\dot x_t + \big(1 - \alpha(T_e, f_d)\big)\,\hat{\dot x}_{t-1} && \text{vitesse lissée à } f_d \\
+  f_c &= f_{\min} + \beta\,|\hat{\dot x}_t| && \text{coupure adaptative} \\
+  \hat x_t &= \alpha(T_e, f_c)\,x_t + \big(1 - \alpha(T_e, f_c)\big)\,\hat x_{t-1} && \text{sortie}
+\end{align}
+La période $T_e$ est mesurée à chaque échantillon (différence des instants, bornée à \qty{1}{\milli\second}). Le filtre reste donc correct si la cadence de la caméra varie ou si des images sont sautées (clignements). Le premier échantillon après une remise à zéro est renvoyé tel quel.
+
+\subsection{Réglages et ordres de grandeur}
+
+Les coordonnées sont en fractions de fenêtre ; la vitesse est donc en fenêtres par seconde.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.62\textwidth, height=5.4cm, xmin=0, xmax=6, ymin=0, ymax=300, samples=200,
+  xlabel={vitesse lissée $|\hat{\dot x}|$ (fenêtres/s)}, ylabel={constante de temps $\tau$ (ms)},
+  grid=major, grid style={black!8}, tick label style={font=\small}, label style={font=\small}]
+  \addplot[very thick, accent, domain=0:6] {1000/(2*pi*(0.6+3*x))};
+  \node[font=\scriptsize, anchor=west] at (axis cs:0.15,265) {repos : $\tau \approx \qty{265}{\milli\second}$};
+  \node[font=\scriptsize, anchor=west] at (axis cs:1.05,60) {1~fenêtre/s : $\tau \approx \qty{44}{\milli\second}$};
+\end{axis}
+\end{tikzpicture}
+\caption{Constante de temps du filtre en fonction de la vitesse, avec $f_{\min} = \qty{0.6}{\hertz}$ et $\beta = 3$.}
+\end{figure}
+
+\begin{origine}
+\code{ONE_EURO_MIN_CUTOFF = 0.6} Hz, \code{ONE_EURO_BETA = 3.0}, \code{ONE_EURO_D_CUTOFF = 1.0} Hz. Le premier est réglable par \code{filtre_stabilite}, le deuxième par \code{filtre_reactivite}.
+\begin{itemize}
+  \item $f_d = \qty{1}{\hertz}$ est la valeur recommandée par les auteurs du filtre \cite{casiez2012} (\litt).
+  \item $f_{\min}$ et $\beta$ se règlent selon la procédure de l'article : $\beta = 0$ d'abord, puis $f_{\min}$ baissé jusqu'à ce que le tremblement en fixation disparaisse ; enfin $\beta$ augmenté jusqu'à ce que le retard en mouvement devienne acceptable (\empi).
+  \item À l'arrêt, $\tau = 1/(2\pi\cdot0.6) \approx \qty{265}{\milli\second}$ : le curseur est très stable. Pour une vitesse lissée de 1~fenêtre/s, $f_c = \qty{3.6}{\hertz}$ et $\tau \approx \qty{44}{\milli\second}$.
+  \item La vitesse étant elle-même lissée à \qty{1}{\hertz} ($\tau_d \approx \qty{160}{\milli\second}$), la coupure ne monte pas instantanément au début d'une saccade : le curseur rattrape le regard en quelques images au lieu d'une seule. C'est le prix de la robustesse au bruit de la vitesse.
+\end{itemize}
+\end{origine}
+
+Les filtres (un par coordonnée) sont remis à zéro à la fin d'une calibration, au recentrage, au reset et au chargement d'une calibration : sans cela, le filtre ferait glisser lentement le curseur de l'ancienne échelle vers la nouvelle.
+
+\section{Recentrage}
+
+Le tracker garde les 20 dernières prédictions brutes (\code{raw_hist}), soit environ \qty{0.67}{\second} à \qty{30}{images\per\second}. Sur la touche Espace, \code{recenter} calcule
+\begin{equation}
+  \vect{o} = \begin{pmatrix}0.5\\0.5\end{pmatrix} - \frac{1}{20}\sum_{k} \hat{\vect{y}}^\text{brut}_k ,
+\end{equation}
+puis ajoute ce décalage à toutes les prédictions suivantes, avant le filtrage. L'utilisateur regarde le centre de l'écran et appuie sur Espace : le regard est translaté pour que ce point devienne le centre. C'est une correction grossière, valable à la pose courante ; dans la v2, la recalibration au clic la complète par une correction des angles (chapitre~\ref{chap:recal}). La moyenne sur 20 images (\empi) réduit le bruit d'un facteur $\sqrt{20} \approx 4.5$.
+
+\section{Repli avant calibration}
+
+Tant qu'aucun modèle n'est ajusté, les deux trackers utilisent \code{fallback_gaze} (chapitre~\ref{chap:v1}) : le curseur suit grossièrement l'iris, ce qui suffit pour s'installer face à l'écran. Le statut \enquote{Non calibré · touche C} reste affiché.
+
+\section{Fraîcheur du regard}
+
+\code{last_valid} mémorise l'instant de la dernière mesure exploitable. \code{gaze_fresh(max_age)} renvoie vrai si elle date de moins de \code{max_age} secondes ; la boucle principale l'appelle avec \code{delai_perte_regard}.
+
+\begin{origine}
+\code{delai_perte_regard = 0.5} s (\deriv{} / \empi). Ce délai doit être plus long qu'un clignement ordinaire suivi de son maintien : environ \qtyrange{0.25}{0.35}{\second} plus \qty{0.15}{\second}. Ainsi, un clignement pendant une fixation \emph{n'interrompt pas} le chrono de sélection. En revanche, si le visage disparaît (l'utilisateur tourne la tête, sort du champ), la sélection en cours est annulée en une demi-seconde, et le curseur devient gris.
+\end{origine}
+
+Après une calibration, \code{last_valid} est remis à \code{None} : le regard n'est considéré comme frais qu'à partir de la première mesure faite avec le nouveau modèle.

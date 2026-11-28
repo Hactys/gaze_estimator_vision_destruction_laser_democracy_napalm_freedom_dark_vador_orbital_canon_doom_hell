@@ -1,0 +1,129 @@
+\documentclass[11pt,a4paper]{report}
+
+% --- Langue, polices ---------------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[french]{babel}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{microtype}
+\usepackage{csquotes}
+\setlength{\emergencystretch}{3em}
+
+% --- Maths -------------------------------------------------------------------------------------
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{siunitx}
+\sisetup{locale=FR, group-minimum-digits=4}
+
+% --- Tableaux, listes --------------------------------------------------------------------------
+\usepackage{booktabs,tabularx,longtable,array}
+\usepackage{enumitem}
+\setlist{itemsep=2pt, topsep=4pt}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+
+% --- Figures -----------------------------------------------------------------------------------
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,shapes.misc,fit,calc,backgrounds,babel}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{float}
+\usepackage{caption}
+
+% --- Code et algorithmes -----------------------------------------------------------------------
+\usepackage{listings}
+\usepackage[ruled,vlined,linesnumbered,french]{algorithm2e}
+\usepackage[most]{tcolorbox}
+
+\definecolor{codebg}{RGB}{246,247,250}
+\definecolor{codekw}{RGB}{0,70,160}
+\definecolor{codecom}{RGB}{110,110,110}
+\definecolor{codestr}{RGB}{160,60,0}
+\definecolor{accent}{RGB}{79,142,247}
+\definecolor{doux}{RGB}{120,126,140}
+
+\lstset{
+  language=Python, basicstyle=\ttfamily\small, keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecom}\itshape, stringstyle=\color{codestr}, backgroundcolor=\color{codebg},
+  frame=single, rulecolor=\color{black!15}, breaklines=true, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, xleftmargin=4pt, xrightmargin=4pt, aboveskip=8pt, belowskip=8pt,
+  literate={é}{{\'e}}1 {è}{{\`e}}1 {ê}{{\^e}}1 {à}{{\`a}}1 {â}{{\^a}}1 {ç}{{\c{c}}}1
+           {ù}{{\`u}}1 {û}{{\^u}}1 {ô}{{\^o}}1 {î}{{\^i}}1 {ï}{{\"i}}1 {É}{{\'E}}1 {À}{{\`A}}1
+           {œ}{{\oe}}1 {«}{{\guillemotleft}}1 {»}{{\guillemotright}}1 {→}{{$\to$}}1
+           {θ}{{$\theta$}}1 {φ}{{$\varphi$}}1 {·}{{$\cdot$}}1 {×}{{$\times$}}1
+}
+
+% --- Encadrés ----------------------------------------------------------------------------------
+\newtcolorbox{origine}[1][]{colback=accent!6, colframe=accent!60, boxrule=0.5pt, arc=2pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt, fonttitle=\bfseries\small, title={Origine des valeurs}, #1}
+\newtcolorbox{attention}[1][]{colback=orange!7, colframe=orange!70!black, boxrule=0.5pt, arc=2pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt, fonttitle=\bfseries\small, title={Point d'attention}, #1}
+
+% --- Raccourcis --------------------------------------------------------------------------------
+% \code{...} : texte machine, coupable après _ . / (sans casser les identifiants ailleurs)
+\ExplSyntaxOn
+\cs_new_protected:Npn \projet_code:n #1
+  {
+    \str_set:Nn \l_tmpa_str {#1}
+    \str_map_inline:Nn \l_tmpa_str
+      { ##1 \str_if_in:nnT { _./ } {##1} { \allowbreak } }
+  }
+\DeclareRobustCommand{\code}[1]{\texttt{\projet_code:n{#1}}}
+\DeclareRobustCommand{\fichier}[1]{\texttt{\projet_code:n{#1}}}
+\ExplSyntaxOff
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\T}{^{\top}}
+\DeclareMathOperator{\atantwo}{atan2}
+\DeclareMathOperator{\med}{med}
+\DeclareMathOperator{\MAD}{MAD}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\tr}{tr}
+\DeclareMathOperator{\sign}{sign}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% Étiquettes d'origine des constantes
+\newcommand{\litt}{\textsc{littérature}}
+\newcommand{\deriv}{\textsc{dérivée}}
+\newcommand{\empi}{\textsc{empirique}}
+\newcommand{\conv}{\textsc{convention}}
+
+\usepackage[hidelinks]{hyperref}
+\usepackage{bookmark}
+
+\title{\textbf{Eye tracker par webcam pour l'accessibilité}\\[6pt]
+  \large Documentation technique complète : modèles, mathématiques, pipeline et implémentation}
+\author{Projet vision -- ISAE}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Ce document décrit de bout en bout le logiciel développé dans le dépôt : un système qui transforme une webcam ordinaire en dispositif de pointage par le regard, destiné à une personne qui ne peut pas utiliser ses mains, sur PC ou sur Raspberry Pi. L'utilisateur fixe un bouton pendant deux secondes pour déclencher une action (raccourci clavier, texte, programme, broche GPIO, requête HTTP).
+
+Il explique les deux estimateurs de regard successifs : une régression ridge sur des caractéristiques 2D de l'œil (v1), puis un modèle géométrique 3D de la tête et des globes oculaires (v2), avec recalibration continue à chaque clic. Pour chaque algorithme non standard, il donne la dérivation mathématique ; pour chaque constante du code, il indique d'où vient sa valeur (littérature, dérivation, convention ou choix empirique). Il détaille enfin l'organisation en threads, les objectifs de performance, l'interface, la configuration et les actions.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/01-introduction}
+\input{sections/02-architecture}
+\input{sections/03-mediapipe}
+\input{sections/04-v1}
+\input{sections/05-v2-geometrie}
+\input{sections/06-v2-modele}
+\input{sections/07-recalibration}
+\input{sections/08-traitements}
+\input{sections/09-interaction}
+\input{sections/10-rendu}
+\input{sections/11-configuration}
+\input{sections/12-actions}
+\input{sections/13-bilan}
+
+\appendix
+\input{sections/A-constantes}
+
+\input{sections/bibliographie}
+
+\end{document}

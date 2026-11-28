@@ -1,0 +1,90 @@
+\chapter{Détection du visage avec MediaPipe}
+\label{chap:mediapipe}
+
+\section{Le modèle Face Landmarker}
+
+Les deux trackers reposent sur \emph{MediaPipe Face Landmarker}, un réseau de neurones de Google qui estime un maillage 3D du visage à partir d'une seule image RGB \cite{kartynnik2019}. Il est complété par un raffinement de la région des yeux qui localise l'iris \cite{ablavatski2020}. Le fichier \fichier{models/face_landmarker.task} contient le détecteur de visage, le maillage, l'estimateur d'iris et le modèle de \emph{blendshapes}. Il s'agit de la version \code{float16} : les poids sont stockés sur 16 bits, ce qui divise par deux la taille du fichier, sans effet notable sur la précision.
+
+\paragraph{Téléchargement.} \code{ensure_model()} télécharge le fichier depuis le stockage public de MediaPipe s'il est absent. Il écrit d'abord dans \fichier{face_landmarker.task.part}, puis renomme ce fichier avec \code{os.replace}, qui est atomique. Une coupure pendant le téléchargement ne laisse donc jamais un modèle tronqué, qui ferait échouer tous les lancements suivants. Le chemin est calculé par rapport au fichier source (\code{os.path.dirname(os.path.dirname(__file__))}) : le modèle est trouvé quel que soit le dossier d'où l'on lance le programme.
+
+\section{Options utilisées}
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l L@{}}
+\toprule
+Option & Valeur & Raison \\
+\midrule
+\code{running_mode} & \code{VIDEO} & Le modèle réutilise le visage trouvé à l'image précédente au lieu de relancer le détecteur à chaque image, ce qui est plus rapide. Il exige des horodatages strictement croissants. \\
+\code{num_faces} & 1 & Un seul utilisateur. Le commentaire du code note que le lissage temporel interne de MediaPipe n'est actif qu'avec un seul visage. \\
+\code{min_face_detection_confidence} & \num{0.5} & Valeur par défaut de MediaPipe (\conv). \\
+\code{min_face_presence_confidence} & \num{0.5} & Idem : sous ce score, le visage est considéré comme perdu et le détecteur est relancé. \\
+\code{min_tracking_confidence} & \num{0.5} & Idem. \\
+\code{output_face_blendshapes} & \code{True} & Scores de clignement et de regard haut/bas. \\
+\code{output_facial_transformation_matrixes} & \code{True} & Pose de la tête utilisée par la v1. \\
+\bottomrule
+\end{tabularx}
+\caption{Options de \code{FaceLandmarkerOptions}.}
+\end{table}
+
+\section{Ce que renvoie MediaPipe}
+
+\subsection{Landmarks}
+
+Pour chaque image, \code{result.face_landmarks[0]} contient 478 points $(x, y, z)$ : 468 pour le maillage du visage et $2\times5$ pour les iris (un centre et quatre points du contour, pour chaque œil).
+\begin{itemize}
+  \item $x$ et $y$ sont normalisés par la largeur et la hauteur de l'image : $u = x\,w$ et $v = y\,h$ donnent les pixels.
+  \item $z$ est une profondeur \emph{relative}, d'origine environ au centre de la tête et négative vers la caméra, exprimée \emph{à la même échelle que $x$}. Multiplier $z$ par $w$ la convertit donc en pixels : c'est ce que fait \code{landmarks_array} (\code{* np.array([w, h, w])}).
+\end{itemize}
+
+L'interprétation précise de $z$ compte pour la v2 (section~\ref{sec:retroprojection}). Le code suppose que $z\,w$ est un écart de profondeur $\Delta Z$ projeté avec le même facteur que les coordonnées latérales, c'est-à-dire $z\,w \approx \Delta Z \cdot f / Z_0$, où $Z_0$ est la distance de la tête et $f$ la focale en pixels. Cette hypothèse est cohérente avec la façon dont le maillage est appris (un modèle de projection faiblement perspective), mais $z$ reste une \emph{estimation} du réseau, plus bruitée que $x$ et $y$.
+
+\subsection{Blendshapes}
+
+\code{result.face_blendshapes[0]} donne 52 scores entre 0 et 1, nommés selon la convention ARKit. Le code en utilise six :
+\begin{itemize}
+  \item \code{eyeBlinkLeft}, \code{eyeBlinkRight} : fermeture des paupières ;
+  \item \code{eyeLookUpLeft/Right}, \code{eyeLookDownLeft/Right} : regard vers le haut et vers le bas.
+\end{itemize}
+Ces scores sont appris globalement sur l'apparence de l'œil : ils captent des indices que la seule position de l'iris rend mal, comme l'abaissement de la paupière supérieure quand on regarde en bas.
+
+\subsection{Matrice de transformation}
+
+\code{facial_transformation_matrixes[0]} est une matrice homogène $4\times4$ qui place un visage canonique de MediaPipe dans le repère de la caméra. La v1 n'en garde que le bloc $3\times3$ de rotation, dont elle normalise les colonnes pour retirer l'échelle (fonction \code{head_pose}). Les angles d'Euler en sont extraits par :
+\begin{equation}
+\text{pitch} = \atantwo(r_{21}, r_{22}), \quad
+\text{yaw} = \atantwo\!\left(-r_{20}, \sqrt{r_{21}^2 + r_{22}^2}\right), \quad
+\text{roll} = \atantwo(r_{10}, r_{00}),
+\end{equation}
+avec repliement du pitch dans $[-\ang{90}, \ang{90}]$. C'est la décomposition classique \[ R = R_z(\text{roll})\,R_y(\text{yaw})\,R_x(\text{pitch}). \] La v2 n'utilise pas cette matrice : elle estime sa propre pose avec un modèle de tête propre à l'utilisateur (section~\ref{sec:pose}).
+
+\section{Points du visage utilisés}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Point & Œil A (gauche de l'image) & Œil B (droite de l'image) \\
+\midrule
+Coin extérieur (\code{outer}) & 33 & 263 \\
+Coin intérieur (\code{inner}) & 133 & 362 \\
+Paupière haute (\code{top}) & 159 & 386 \\
+Paupière basse (\code{bottom}) & 145 & 374 \\
+Centre de l'iris (\code{iris}) & 468 & 473 \\
+Contour de l'iris (\code{contour}) & 469--472 & 474--477 \\
+\bottomrule
+\end{tabular}
+\caption{Indices du maillage MediaPipe (dictionnaires \code{EYE_A}, \code{EYE_B} de \fichier{utils.py}).}
+\end{table}
+
+Ce sont les indices canoniques du maillage MediaPipe (\conv) : les paupières 159/145 et 386/374 sont les points médians des bords palpébraux. Le bout du nez (\code{NOSE_TIP = 1}) sert à la position de la tête dans la v1. Le premier prototype (\fichier{main.py} à la racine) utilisait d'autres points de paupière (27/23 et 258/253), plus éloignés de l'œil ; un commentaire \code{TODO} de ce fichier en notait déjà l'imprécision.
+
+\paragraph{Miroir et identité des yeux.} L'image est retournée horizontalement avant l'analyse (\code{cv2.flip(image, 1)}), pour que le curseur se déplace comme dans un miroir. Ce retournement échange l'œil gauche et l'œil droit du sujet. Il n'a pourtant aucune conséquence : \code{eye_features} trie les deux coins de chaque œil par abscisse, et la v2 associe chaque iris au globe le plus proche. \enquote{A} désigne donc toujours l'œil situé à gauche de l'image traitée.
+
+\section{Horodatage}
+
+En mode \code{VIDEO}, MediaPipe exige des horodatages en millisecondes strictement croissants. Le tracker calcule
+\[
+  t_\text{ms} = \big\lfloor 1000\,(t_\text{monotone} - t_\text{démarrage}) \big\rfloor
+\]
+et, si deux images tombent sur la même milliseconde, impose $t_\text{ms} = t_\text{ms}^\text{précédent} + 1$. L'horloge \code{time.monotonic()} ne recule jamais, contrairement à \code{time.time()} qui peut être modifiée par une synchronisation NTP. Le premier prototype utilisait \code{time.time()}.

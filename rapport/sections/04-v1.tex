@@ -1,0 +1,200 @@
+\chapter{Tracker v1 : régression sur des caractéristiques 2D}
+\label{chap:v1}
+
+Le tracker v1 (\fichier{victor/utils.py}, repris de \fichier{test_xav.py}) est une approche \emph{par apprentissage} : il mesure à chaque image un vecteur de caractéristiques (\emph{features}) de l'œil et de la tête, et apprend pendant la calibration une fonction \enquote{features $\mapsto$ point de l'écran}. Il est encore utilisé par \fichier{main.py}, et plusieurs de ses briques servent à la v2 : features, clignements, One Euro, repli avant calibration.
+
+\section{Caractéristiques de l'œil}
+\label{sec:features}
+
+\subsection{Repère propre à chaque œil}
+
+Pour un œil, on note en pixels $\vect{c}_g$ et $\vect{c}_d$ les deux coins triés par abscisse, $\vect{p}$ le centre de l'iris, et $\vect{l}_h$, $\vect{l}_b$ les milieux des paupières haute et basse. La fonction \code{eye_features} construit :
+\begin{align}
+  \ell &= \|\vect{c}_d - \vect{c}_g\| && \text{(largeur de l'œil)}\\
+  \vect{u} &= (\vect{c}_d - \vect{c}_g)/\ell && \text{(axe des coins)}\\
+  \vect{v} &= (-u_y,\ u_x) && \text{(perpendiculaire, vers le bas de l'image)}\\
+  \vect{m} &= (\vect{c}_g + \vect{c}_d)/2 && \text{(milieu des coins)}
+\end{align}
+puis les quatre mesures, toutes \emph{sans dimension}, exprimées en largeurs d'œil :
+\begin{equation}
+  f_x = \frac{(\vect{p} - \vect{m})\cdot\vect{u}}{\ell}, \qquad
+  f_y = \frac{(\vect{p} - \vect{m})\cdot\vect{v}}{\ell}, \qquad
+  f_l = \frac{\big(\vect{p} - \tfrac{\vect{l}_h + \vect{l}_b}{2}\big)\cdot\vect{v}}{\ell}, \qquad
+  a_p = \frac{\|\vect{l}_h - \vect{l}_b\|}{\ell}.
+\end{equation}
+
+Ces choix ont chacun une raison :
+\begin{itemize}
+  \item \textbf{Les calculs se font en pixels} (et non en coordonnées normalisées). Avec une image $640\times480$, les échelles horizontale et verticale des coordonnées normalisées diffèrent d'un facteur $4/3$ ; en pixels, le repère est orthonormé et les angles sont justes.
+  \item \textbf{Le repère suit l'axe des coins} : une inclinaison de la tête (roll) fait tourner $\vect{u}$ et $\vect{v}$ avec l'œil, si bien que $f_x$ et $f_y$ n'en dépendent pas.
+  \item \textbf{La normalisation se fait par la largeur} $\ell$ : la distance entre les coins ne dépend pas de la direction du regard ni des clignements, contrairement à la hauteur de l'œil. Le premier prototype divisait l'écart vertical par la hauteur paupière haute -- paupière basse ; or, quand on regarde vers le bas, la paupière supérieure descend avec l'iris et ce rapport bouge peu, puis devient instable au moindre clignement. La division par $\ell$ rend aussi les mesures indépendantes de la distance à la caméra.
+  \item \textbf{Deux mesures verticales} : $f_y$ (par rapport aux coins) et $f_l$ (par rapport aux paupières) se complètent ; la régression choisit leur combinaison.
+\end{itemize}
+Si $\ell < 10^{-6}$ (œil dégénéré), la fonction renvoie \code{None}.
+
+\subsection{Vecteur complet}
+
+\code{extract_features} moyenne les mesures des deux yeux et y ajoute des grandeurs de tête :
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}c l L@{}}
+\toprule
+Indice & Nom & Définition \\
+\midrule
+0 & $f_x$ & iris horizontal (moyenne des deux yeux) \\
+1 & $f_y$ & iris vertical par rapport aux coins \\
+2 & $f_l$ & iris vertical par rapport aux paupières \\
+3 & $b_v$ & $\tfrac12(\text{lookDown}_L + \text{lookDown}_R) - \tfrac12(\text{lookUp}_L + \text{lookUp}_R)$ \\
+4 & $a_p$ & ouverture de l'œil \\
+5 & yaw & angle de la tête (degrés), matrice MediaPipe \\
+6 & pitch & idem \\
+7 & $h_x$ & abscisse normalisée du bout du nez \\
+8 & $h_y$ & ordonnée normalisée du bout du nez \\
+9 & $h_s$ & $\|\vect{c}^A_\text{ext} - \vect{c}^B_\text{ext}\|_\text{px} / w$ : écart des coins extérieurs, $\propto 1/\text{distance}$ \\
+\bottomrule
+\end{tabularx}
+\caption{Les 10 features de la v1 (\code{FEATURE_NAMES}).}
+\end{table}
+
+La position $(h_x, h_y)$ et la taille apparente $h_s$ complètent la pose : déplacer la tête latéralement ou s'approcher de l'écran change le point regardé même à direction de l'œil constante.
+
+\paragraph{Score de clignement.} $s_\text{blink} = \tfrac12(\text{eyeBlinkLeft} + \text{eyeBlinkRight})$. Si les blendshapes sont absents, le repli est $s_\text{blink} = 1$ si $a_p < \num{0.08}$, et $0$ sinon. Un œil ouvert a typiquement $a_p \approx \numrange{0.25}{0.35}$ (hauteur d'environ un tiers de la largeur) ; \num{0.08} correspond à un œil presque fermé (\empi).
+
+\section{Modèle de régression ridge}
+
+\subsection{Matrice de design}
+
+\code{design_matrix} ajoute trois termes quadratiques en $(f_x, f_y)$ aux 10 features :
+\begin{equation}
+  \vect{x} = \big(f_x, f_y, f_l, b_v, a_p, \text{yaw}, \text{pitch}, h_x, h_y, h_s,\ f_x^2,\ f_y^2,\ f_x f_y\big) \in \R^{13}.
+\end{equation}
+La relation entre position de l'iris et point de l'écran n'est pas linéaire : l'iris décrit une sphère, et l'écran plat est vu sous un angle variable. Un polynôme d'ordre 2 en $(f_x, f_y)$ capte l'essentiel de cette courbure. La tête n'entre que linéairement : c'est une correction au premier ordre.
+
+\subsection{Standardisation pondérée avec planchers}
+
+Avec des poids d'échantillon $\omega_i$ normalisés à $\sum_i \omega_i = n$ (moyenne 1), chaque colonne $j$ est centrée et réduite :
+\begin{equation}
+  \mu_j = \frac{\sum_i \omega_i x_{ij}}{n}, \qquad
+  \sigma_j = \max\!\Big(\sqrt{\tfrac{1}{n}\textstyle\sum_i \omega_i (x_{ij} - \mu_j)^2},\ \sigma_j^\text{min}\Big), \qquad
+  z_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j}.
+\end{equation}
+
+\paragraph{Pourquoi un plancher $\sigma_j^\text{min}$ (\code{SD_FLOORS}) ?} La pénalité ridge porte sur les coefficients \emph{standardisés} $\beta_j$. Le coefficient dans les unités d'origine vaut $\beta_j / \sigma_j$. Si une feature a très peu varié pendant la calibration (la tête presque immobile, par exemple), $\sigma_j$ est minuscule : un $\beta_j$ modeste, donc à peine pénalisé, devient alors un coefficient énorme dans les unités d'origine. Le jour où la tête bouge vraiment, la prédiction explose. Le plancher impose de traiter une feature peu variable \emph{comme si} elle avait au moins l'écart-type $\sigma_j^\text{min}$, ce qui borne son coefficient réel.
+
+\begin{origine}
+\code{SD_FLOORS} $= (\num{0.01}, \num{0.005}, \num{0.005}, \num{0.05}, \num{0.02}, \ang{1}, \ang{1}, \num{0.005}, \num{0.005}, \num{0.003}, \num{0.002}, \num{0.0005}, \num{0.0005})$ (\empi). Ces valeurs sont de l'ordre du bruit de mesure de chaque feature. Par exemple, à \qty{60}{\centi\metre}, un œil de \qty{30}{\milli\metre} fait environ \qty{28}{px} de large ; \num{0.01} largeur d'œil représente donc environ \qty{0.3}{px}, l'ordre de grandeur du bruit de localisation de l'iris par MediaPipe. Un degré pour yaw et pitch correspond au bruit typique de la matrice de pose.
+\end{origine}
+
+\subsection{Résolution}
+
+Il s'agit d'une régression ridge \cite{hoerl1970}. Les sorties $\vect{y}_i = (x_i, y_i)$ sont centrées par leur moyenne pondérée $\bar{\vect{y}}$. On résout, pour les deux sorties à la fois ($B \in \R^{13\times2}$) :
+\begin{equation}
+  \min_{B}\ \sum_i \omega_i \big\|\vect{y}_i - \bar{\vect{y}} - \vect{z}_i\T B\big\|^2 + \lambda\, n \sum_j P_j \|\vect{\beta}_j\|^2,
+\end{equation}
+dont la solution est
+\begin{equation}
+  B = \big(Z\T \Omega Z + \lambda n \diag(P)\big)^{-1} Z\T \Omega\, (Y - \bar{\vect{y}}),
+  \qquad \hat{\vect{y}}(\vect{x}) = \bar{\vect{y}} + \vect{z}(\vect{x})\T B .
+\end{equation}
+
+\begin{itemize}
+  \item L'ordonnée à l'origine n'est pas pénalisée : elle est absorbée par le centrage ($\bar{\vect{y}}$).
+  \item Le facteur $n$ devant $\lambda$ rend la régularisation \enquote{par échantillon}. Le terme de données croît comme $n$ ; sans ce facteur, le même $\lambda$ régulariserait beaucoup plus une calibration courte qu'une longue.
+  \item $P_j = 1$ pour les features linéaires et $P_j = 4$ pour les termes quadratiques (\code{PENALTY}, \empi) : les courbures ne sont acceptées que si les données les justifient nettement. Comme la pénalité est quadratique, un facteur 4 réduit leur amplitude typique d'un facteur 2 environ.
+\end{itemize}
+
+\subsection{Écrêtage des features de tête}
+
+À la prédiction, les colonnes standardisées de la tête (yaw, pitch, $h_x$, $h_y$, $h_s$) sont bornées à $\pm3$ (\code{HEAD_CLIP_Z}, \deriv) : une pose de tête jamais rencontrée pendant la calibration ne peut pas être extrapolée au-delà de 3 écarts-types appris. Pour une distribution normale, $\pm3\sigma$ couvre \qty{99.7}{\percent} des valeurs ; l'écrêtage ne touche donc que des poses réellement nouvelles.
+
+\section{Calibration v1}
+
+\subsection{Protocole}
+
+\code{Calibration} est une machine à états qui présente une cible à la fois.
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l l L@{}}
+\toprule
+Constante & Valeur & Origine & Justification \\
+\midrule
+\code{CAL_COLS}, \code{CAL_ROWS} & $4\times4$ & \empi & 16 points : assez pour un polynôme d'ordre 2 en 2D (6 coefficients par sortie) avec une large redondance, en restant sous la minute. \\
+\code{CAL_MARGIN} & \num{0.05} & \empi & Les cibles extrêmes sont à \qty{5}{\percent} des bords. Le commentaire indique que cela couvre les bandes latérales (alors de \qty{7}{\percent}), qu'il faut savoir viser. \\
+\code{CAL_LEAD_S} & \qty{2.5}{\second} & \empi & Temps de lecture de la consigne avant la première cible. \\
+\code{CAL_SETTLE_S} & \qty{0.8}{\second} & \empi / \litt & Temps laissé à l'œil pour atteindre la cible : latence d'une saccade (\qtyrange{150}{250}{\milli\second}), saccade correctrice éventuelle, retard du filtrage interne de MediaPipe. \qty{0.8}{\second} est une marge confortable. \\
+\code{CAL_COLLECT_S} & \qty{2.0}{\second} & \empi & Environ 60 images à \qty{30}{images\per\second} : assez pour moyenner le bruit et laisser la tête bouger un peu. \\
+\code{CAL_MIN_SAMPLES} & 15 & \empi & \qty{25}{\percent} des images possibles : tolère clignements et pertes du visage. \\
+\code{CAL_MIN_POINTS} & 10 & \empi & Au moins 10 cibles sur 16, pour garder une couverture spatiale suffisante. \\
+Reprises & 2 & \empi & Une cible ratée est recommencée deux fois, puis ignorée (\code{skipped}). \\
+\bottomrule
+\end{tabularx}
+\caption{Paramètres du protocole de calibration v1.}
+\end{table}
+
+Les 16 cibles sont placées en
+\begin{equation}
+  (x_c, y_r) = \Big(m + (1-2m)\tfrac{c}{3},\ m + (1-2m)\tfrac{r}{3}\Big), \qquad c, r \in \{0,1,2,3\},\ m = \num{0.05},
+\end{equation}
+puis \emph{mélangées aléatoirement} (\code{random.shuffle}). Avec un ordre fixe, l'utilisateur anticipe la cible suivante et y porte le regard avant qu'elle n'apparaisse, ce qui fausse les premiers échantillons.
+
+Durée totale : $\num{2.5} + 16 \times (\num{0.8} + \num{2.0}) = \qty{47.3}{\second}$ sans reprise.
+
+La consigne de la v1 est de \emph{bouger doucement la tête} (petits cercles de quelques centimètres) tout en fixant la cible. C'est indispensable : sans variation de la tête pendant la calibration, la régression ne peut pas apprendre comment les features de tête modifient le point regardé.
+
+\subsection{Rejet des aberrants par cible}
+
+À la fin de chaque cible (\code{reject_outliers}), on écarte les échantillons dont $f_x$ ou $f_y$ s'éloigne de la médiane de plus de 5 écarts-types robustes :
+\begin{equation}
+  \hat\sigma = \max\big(\num{1.4826}\,\MAD,\ \num{0.01}\big), \qquad \text{garder } i \iff |f_i - \med(f)| \leq 5\,\hat\sigma .
+\end{equation}
+
+\paragraph{D'où vient \num{1.4826} ?} Pour une variable normale $X \sim \mathcal N(\mu, \sigma^2)$, la médiane de $|X - \mu|$ vaut $\sigma\,\Phi^{-1}(3/4) = \num{0.67449}\,\sigma$, où $\Phi$ est la fonction de répartition de la loi normale centrée réduite. Donc $\hat\sigma = \MAD / \num{0.67449} = \num{1.4826}\,\MAD$ est un estimateur \emph{cohérent} de $\sigma$ pour des données normales, mais insensible aux valeurs aberrantes : il supporte jusqu'à \qty{50}{\percent} de contamination \cite{rousseeuw1993} (\deriv).
+
+Le seuil de 5 est volontairement large (\empi) : la tête bouge pendant la collecte, si bien que $f_x$ et $f_y$ varient légitimement au sein d'une même cible. Seuls les échantillons franchement aberrants (clignement partiel, saccade) sont retirés ici ; le tri fin vient ensuite, sur les résidus du modèle. Le plancher \num{0.01} évite de tout rejeter quand l'œil est très stable et que le MAD tend vers 0.
+
+\subsection{Ajustement}
+
+\begin{algorithm}[H]
+\caption{Ajustement de la calibration v1 (\code{Calibration.fit})}
+\KwIn{échantillons $\{(\vect{x}_i, \vect{y}_i, g_i)\}$, $g_i$ = indice de la cible}
+\If{moins de 10 cibles validées}{\Return échec}
+\ForEach{$\lambda \in \{\num{0.002}, \num{0.01}, \num{0.05}, \num{0.2}, \num{1}\}$}{
+  $e(\lambda) \leftarrow$ erreur LOPO, somme des erreurs moyennes en $x$ et $y$\;
+}
+$\lambda^\star \leftarrow \argmin_\lambda e(\lambda)$\;
+$\omega_i \leftarrow 1/|\{k : g_k = g_i\}|$ \tcp*{chaque cible pèse autant}
+ajuster le modèle ridge $(\lambda^\star, \omega)$\;
+$r_i \leftarrow \|\hat{\vect{y}}_i - \vect{y}_i\|$\;
+garder $i$ si $r_i \leq \med(r) + 3{,}5 \max(\num{1.4826}\MAD(r), \num{0.01})$\;
+\If{au moins \qty{70}{\percent} sont gardés et au moins un est rejeté}{réajuster sur les échantillons gardés}
+calculer l'erreur d'entraînement et l'erreur LOPO finales\;
+\end{algorithm}
+
+\paragraph{Validation croisée \enquote{une cible laissée de côté} (LOPO).} Pour chaque cible $g$, on entraîne sur toutes les autres cibles et on mesure l'erreur absolue moyenne sur les échantillons de $g$ ; l'erreur LOPO est la moyenne sur les cibles \cite{stone1974}. On laisse de côté une cible \emph{entière}, et non un échantillon : les images d'une même cible sont fortement corrélées (même point, images consécutives), et en retirer une seule sous-estimerait grossièrement l'erreur réelle. Une cible n'est évaluée que s'il reste au moins 20 échantillons pour l'entraînement.
+
+\paragraph{Grille de $\lambda$.} Les cinq valeurs couvrent près de trois ordres de grandeur avec un pas d'environ $\times5$ (\empi). Cela suffit pour une régression ridge : l'erreur varie lentement avec $\log\lambda$.
+
+\paragraph{Poids par cible.} Une cible qui a perdu des images (clignements) ne doit pas compter moins qu'une autre. Le poids $1/n_g$ donne à chaque cible un poids total de 1.
+
+\paragraph{Second rejet.} Le seuil \num{3.5} sur les résidus est celui recommandé par Iglewicz et Hoaglin pour le \enquote{z-score modifié} \cite{iglewicz1993} (\litt). La condition \qty{70}{\percent} (\empi) empêche une calibration ratée de se \enquote{réparer} en jetant la majorité des données.
+
+\subsection{Diagnostics}
+
+À la fin, le statut affiche l'erreur LOPO et l'erreur d'entraînement en pourcentage de la fenêtre, le $\lambda$ choisi et l'écart-type moyen de la tête au sein d'une cible (yaw, pitch). Deux avertissements sont prévus :
+\begin{itemize}
+  \item tête quasi immobile : $\max(\text{sd}_\text{yaw}, \text{sd}_\text{pitch}) < \ang{0.8}$ (\code{CAL_HEAD_MIN_SD}, \empi), la tolérance aux mouvements de tête sera faible ;
+  \item erreur LOPO $> \qty{12}{\percent}$ (\empi) : environ un tiers de la largeur d'une case en grille $2\times2$, l'utilisation devient pénible.
+\end{itemize}
+
+\section{Garde-fous et repli}
+
+\begin{itemize}
+  \item \textbf{Pose trop forte} : $|\text{yaw}| > \ang{40}$ ou $|\text{pitch}| > \ang{35}$ (\code{MAX_YAW_DEG}, \code{MAX_PITCH_DEG}, \empi). Au-delà, l'œil le plus éloigné est fortement raccourci par la perspective, voire masqué par le nez, et la localisation de l'iris n'est plus fiable. Le pitch a une limite plus basse parce que les paupières masquent vite l'iris quand la tête se baisse ou se lève.
+  \item \textbf{Avant calibration} : \code{fallback_gaze} donne $x = \num{0.5} + 3 f_x$ et $y = \num{0.5} + 6 f_y$ (\code{FALLBACK_GAIN_X}, \code{FALLBACK_GAIN_Y}, \empi). Quand le regard balaie l'écran, $f_x$ varie d'environ $\pm\num{0.15}$ et $f_y$ d'environ moitié moins, d'où le gain vertical double. Ce mapping n'a aucune prétention de précision : il permet seulement au curseur de bouger dans le bon sens pendant l'installation.
+\end{itemize}
+
+\section{Limite de la v1}
+
+Le modèle traite la tête comme une correction \emph{linéaire} apprise. Pour bien l'apprendre, il faudrait que la tête explore pendant la calibration toutes les poses de l'utilisation, ce qui est irréaliste. Quand la tête a peu bougé, la régularisation écrase les coefficients de tête vers 0, et le curseur dérive dès que la tête se déplace en utilisation. C'est ce constat qui a motivé le modèle géométrique de la v2 : la compensation de la tête y est \emph{calculée}, pas apprise.

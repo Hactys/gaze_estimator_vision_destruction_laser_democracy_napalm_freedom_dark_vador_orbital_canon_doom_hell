@@ -16,6 +16,8 @@ import json
 import queue
 import re
 import shlex
+import socket
+import struct
 import subprocess
 import threading
 import time
@@ -421,3 +423,207 @@ def http_lire(ctx, url, nom=None):
     if len(texte) > 60:
         texte = texte[:57] + "..."
     ctx.vers_interface.put(("message", f"{nom} : {texte}" if nom else texte or "(réponse vide)"))
+
+
+# --- KNX (domotique, via knxd) ----------------------------------------------------------------
+# Reprend Commandes.py : `knxtool groupswrite ip: 6/0/8 1` allume le groupe 6/0/8, `... 0` l'éteint.
+# Adresse de groupe sur 3 niveaux : principal (0-31) / médian (0-7) / sous-groupe (0-255).
+# Sans knxtool (ex : sur un PC sans knxd), les actions sont simulées dans la console.
+KNX_URL = "ip:"          # connexion au démon knxd local ; ex : "ip:192.168.1.50" pour un knxd distant
+KNX_DELAI_S = 3.0
+_knx_simule = None       # True une fois qu'on a constaté que knxtool est absent
+
+
+def _groupe_knx(texte):
+    """'6/0/8' -> '6/0/8'. Lève ValueError."""
+    m = re.fullmatch(r"(\d{1,2})/(\d)/(\d{1,3})", str(texte).strip())
+    if not m or not (int(m.group(1)) <= 31 and int(m.group(2)) <= 7 and int(m.group(3)) <= 255):
+        raise ValueError(f"adresse de groupe KNX « {texte} » invalide (ex : 6/0/8 ; max 31/7/255)")
+    return "/".join(str(int(g)) for g in m.groups())
+
+
+def _verifier_knx(avec_valeur):
+    def verifier(args, menus):
+        try:
+            _groupe_knx(args[0])
+            if avec_valeur:
+                _nombre(args[1], "la valeur", 0, 63)
+                if not args[1].isdigit():
+                    raise ValueError(f"la valeur doit être un entier entre 0 et 63 (reçu « {args[1]} »)")
+        except ValueError as e:
+            return str(e)
+        return None
+    return verifier
+
+
+def _knx_ecrire(groupe, valeur, texte):
+    """Envoie `valeur` (0-63, ex : 1 = allumer, 0 = éteindre) sur l'adresse de groupe."""
+    global _knx_simule
+    groupe = _groupe_knx(groupe)
+    if _knx_simule:
+        print(f"[KNX simulé] {groupe} <- {valeur} ({texte})")
+        return
+    try:
+        res = subprocess.run(["knxtool", "groupswrite", KNX_URL, groupe, str(valeur)],
+                             capture_output=True, text=True, timeout=KNX_DELAI_S)
+    except FileNotFoundError:
+        print("[KNX] knxtool non installé : actions KNX simulées.")
+        _knx_simule = True
+        print(f"[KNX simulé] {groupe} <- {valeur} ({texte})")
+        return
+    except subprocess.TimeoutExpired:
+        raise ErreurAction(f"KNX {groupe} : pas de réponse du bus")
+    if res.returncode != 0:  # ex : knxd arrêté, passerelle IP débranchée
+        detail = (res.stderr or res.stdout).strip().splitlines()
+        print(f"[KNX] {groupe} : {detail[-1] if detail else res.returncode}")
+        raise ErreurAction("Bus KNX non connecté")
+    print(f"[KNX] {groupe} <- {valeur} ({texte})")
+
+
+@action("knx_allumer", "knx_allumer 6/0/8   (envoie 1 sur l'adresse de groupe)", verifier=_verifier_knx(False))
+def knx_allumer(ctx, groupe):
+    _knx_ecrire(groupe, 1, "allumer")
+
+
+@action("knx_eteindre", "knx_eteindre 6/0/8   (envoie 0 sur l'adresse de groupe)", verifier=_verifier_knx(False))
+def knx_eteindre(ctx, groupe):
+    _knx_ecrire(groupe, 0, "éteindre")
+
+
+@action("knx_ecrire", "knx_ecrire 6/0/8 1   (valeur entière de 0 à 63)", verifier=_verifier_knx(True))
+def knx_ecrire(ctx, groupe, valeur):
+    _knx_ecrire(groupe, int(valeur), "écrire")
+
+
+# --- Bus CAN (passerelle USB/CAN) -------------------------------------------------------------
+# Passe par SocketCAN (module socket de Python, aucune dépendance). La passerelle doit apparaître
+# comme une interface réseau « can0 », configurée hors de l'application :
+#   - passerelles natives (CANable/candleLight gs_usb, PEAK, Kvaser...) :
+#       sudo ip link set can0 up type can bitrate 500000
+#   - passerelles série « slcan » (Lawicel, CANable firmware slcan...) :
+#       sudo slcand -o -c -s6 /dev/ttyACM0 can0 && sudo ip link set can0 up     (-s6 = 500 kbit/s)
+#   - pour tester sans matériel :
+#       sudo modprobe vcan && sudo ip link add dev can0 type vcan && sudo ip link set can0 up
+# Sans SocketCAN (Windows, macOS), les actions CAN sont simulées dans la console.
+CAN_INTERFACE = "can0"
+CAN_DELAI_S = 2.0        # attente maximale d'une trame pour can_lire
+_CAN_TRAME = struct.Struct("=IB3x8s")   # struct can_frame : identifiant, longueur, bourrage, données
+_CAN_EFF = 0x80000000    # drapeau « identifiant étendu » (29 bits)
+_can_verrou = threading.Lock()
+_can_envoi = None        # socket réutilisé pour les envois
+
+
+def _can_id(texte):
+    """'123' ou '0x123' -> (0x123, False) ; plus de 3 chiffres hexa ou > 0x7FF -> identifiant étendu."""
+    t = str(texte).strip()
+    t = t[2:] if t.lower().startswith("0x") else t
+    if not re.fullmatch(r"[0-9A-Fa-f]{1,8}", t) or int(t, 16) > 0x1FFFFFFF:
+        raise ValueError(f"identifiant CAN « {texte} » invalide : hexadécimal, ex : 123 ou 1ABCDEF0")
+    v = int(t, 16)
+    return v, len(t) > 3 or v > 0x7FF
+
+
+def _can_donnees(args):
+    """['01', 'FF', '00'] ou ['01FF00'] ou ['01.FF.00'] -> b'\\x01\\xff\\x00' (8 octets max)."""
+    t = "".join(args).replace(".", "").replace(":", "")
+    if not re.fullmatch(r"(?:[0-9A-Fa-f]{2}){0,8}", t):
+        raise ValueError("données CAN invalides : jusqu'à 8 octets en hexadécimal, ex : 01 FF 00")
+    return bytes.fromhex(t)
+
+
+def _can_args(args):
+    """Accepte « 123 01 FF » ou la syntaxe de cansend « 123#01FF »."""
+    if args and "#" in args[0]:
+        ident, donnees = args[0].split("#", 1)
+        args = [ident, donnees, *args[1:]]
+    return args
+
+
+def _verifier_can_envoyer(args, menus):
+    args = _can_args(args)
+    if not args:
+        return "il faut au moins l'identifiant, ex : can_envoyer 123 01 FF"
+    try:
+        _can_id(args[0])
+        _can_donnees(args[1:])
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def _verifier_can_lire(args, menus):
+    try:
+        _can_id(args[0])
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def _can_socket():
+    """Nouveau socket CAN brut lié à CAN_INTERFACE, ou None si SocketCAN n'existe pas ici."""
+    if not hasattr(socket, "AF_CAN"):
+        return None
+    s = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+    try:
+        s.bind((CAN_INTERFACE,))
+    except OSError:
+        s.close()
+        raise ErreurAction(f"Interface {CAN_INTERFACE} absente (passerelle CAN branchée ?)")
+    return s
+
+
+def _hex(donnees):
+    return " ".join(f"{o:02X}" for o in donnees)
+
+
+@action("can_envoyer", "can_envoyer 123 01 FF 00   ou   can_envoyer 123#01FF00   (identifiant et octets en hexa)",
+        verifier=_verifier_can_envoyer)
+def can_envoyer(ctx, *args):
+    global _can_envoi
+    args = _can_args(args)
+    ident, etendu = _can_id(args[0])
+    donnees = _can_donnees(args[1:])
+    nom = f"{ident:X}#{donnees.hex().upper()}"
+    with _can_verrou:
+        if _can_envoi is None:
+            _can_envoi = _can_socket()
+            if _can_envoi is None:
+                print("[CAN] SocketCAN indisponible sur cette machine : actions CAN simulées.")
+                _can_envoi = False
+        if _can_envoi is False:
+            print(f"[CAN simulé] {CAN_INTERFACE} {nom}")
+            return
+        trame = _CAN_TRAME.pack(ident | (_CAN_EFF if etendu else 0), len(donnees), donnees.ljust(8, b"\0"))
+        try:
+            _can_envoi.send(trame)
+        except OSError as e:  # interface tombée, bus-off, aucun nœud n'acquitte (ENOBUFS)...
+            _can_envoi.close()
+            _can_envoi = None  # on retentera d'ouvrir l'interface au prochain envoi
+            print(f"[CAN] envoi {nom} : {e}")
+            raise ErreurAction(f"Bus CAN : envoi impossible ({e.strerror or e})")
+    print(f"[CAN] {CAN_INTERFACE} {nom}")
+
+
+@action("can_lire", 'can_lire 123   ou   can_lire 123 "Capteur"   (attend une trame et affiche ses octets)',
+        verifier=_verifier_can_lire)
+def can_lire(ctx, identifiant, nom=None):
+    ident, etendu = _can_id(identifiant)
+    nom = nom or f"CAN {ident:X}"
+    s = _can_socket()
+    if s is None:
+        print(f"[CAN simulé] lecture de {ident:X}")
+        ctx.vers_interface.put(("message", f"{nom} : (simulé)"))
+        return
+    with s:
+        # filtre noyau : on ne reçoit que les trames de cet identifiant (même type standard/étendu)
+        cle = ident | (_CAN_EFF if etendu else 0)
+        masque = (0x1FFFFFFF if etendu else 0x7FF) | _CAN_EFF
+        s.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_FILTER, struct.pack("=II", cle, masque))
+        s.settimeout(CAN_DELAI_S)
+        try:
+            _, longueur, donnees = _CAN_TRAME.unpack(s.recv(_CAN_TRAME.size))
+        except socket.timeout:
+            raise ErreurAction(f"{nom} : aucune trame reçue en {CAN_DELAI_S:g} s")
+        except OSError as e:
+            raise ErreurAction(f"Bus CAN : lecture impossible ({e.strerror or e})")
+    ctx.vers_interface.put(("message", f"{nom} : {_hex(donnees[:longueur]) or '(vide)'}"))

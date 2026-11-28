@@ -14,7 +14,7 @@ ecran:
   plein_ecran: oui
   taille_fenetre: [1280, 720]    # largeur, hauteur (si pas en plein écran)
   grille: 2x2                    # lignes x colonnes de boutons centraux : 2x2 ou 2x3
-  largeur_bandes: 12              # largeur de chaque bande latérale, en % de la largeur de l'écran
+  largeur_bandes: 15             # largeur de chaque bande latérale, en % de la largeur de l'écran
   zone_morte:                    # zone centrale où le regard ne déclenche rien
     largeur: 30                  # en % de la largeur de l'écran
     hauteur: 40                  # en % de la hauteur de l'écran
@@ -90,6 +90,17 @@ avance:
 #    http_post 192.168.1.20/api etat=on niveau=3    envoie {"etat": "on", "niveau": 3}
 #    http_put 192.168.1.20/api etat=off             idem en PUT
 #    http_lire 192.168.1.30/temperature "Salon"     affiche la réponse à l'écran (nom optionnel)
+#
+#  Domotique KNX (via knxd / knxtool ; adresse de groupe principal/médian/sous-groupe) :
+#    knx_allumer 6/0/8         envoie 1 sur le groupe (ex : 6/0/8 = centre salon, 6/0/9 = SaM)
+#    knx_eteindre 6/0/8        envoie 0 sur le groupe
+#    knx_ecrire 6/0/8 1        envoie une valeur entière de 0 à 63
+#
+#  Bus CAN via une passerelle USB/CAN (interface SocketCAN « can0 », à activer avant, ex :
+#  sudo ip link set can0 up type can bitrate 500000 ; voir FONCTIONNEMENT.md) :
+#    can_envoyer 123 01 FF 00  envoie une trame : identifiant puis jusqu'à 8 octets, en hexa
+#    can_envoyer 123#01FF00    même chose, syntaxe de cansend (identifiant étendu : 1ABCDEF0#...)
+#    can_lire 123 "Capteur"    attend une trame de cet identifiant (2 s max) et affiche ses octets
 #  Si une action échoue (appareil injoignable...), un message s'affiche et la suite de la liste
 #  d'actions du bouton n'est pas exécutée.
 menus:
